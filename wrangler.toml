@@ -44,4 +44,8 @@ database_id = "00000000-0000-0000-0000-000000000000"
 # re-check quarantined free models. GitHub's own */2 schedule is unusable for this — measured
 # 4-7 h between runs — so the cadence lives here, where we control it.
 [triggers]
-crons = ["*/2 * * * *"]
+crons = [
+  "*/2 * * * *",
+  "0 */2 * * *",
+  "0 */6 * * *"
+]

@@ -37,6 +37,7 @@
 import { handle } from './handler.js';
 import { runMaintenance } from './zen-ring.js';
 import { resolveErrorPublisher } from './events.js';
+import { FreeModelRefresher } from './free-models.js';
 
 export { LadderState } from './state-do.js';
 export { handle, makeStore } from './handler.js';
@@ -52,4 +53,46 @@ export default {
   scheduled(event, env, ctx) {
     ctx.waitUntil(runMaintenance(env));
   },
+  // New scheduled task: run free model collection and benchmark every 2 hours
+  'scheduled-free-models': function(event, env, ctx) {
+    ctx.waitUntil(runFreeModelCollection(env));
+  },
+  // Additional scheduled task: run free model benchmark every 6 hours
+  'scheduled-free-models-benchmark': function(event, env, ctx) {
+    ctx.waitUntil(runBenchmarkFreeModels(env));
+  }
 };
+
+// Free model collection task
+async function runFreeModelCollection(env) {
+  try {
+    const refresher = new FreeModelRefresher({
+      env,
+      intervalMs: 2 * 60 * 60 * 1000 // 2 hours
+    });
+    
+    await refresher.run();
+  } catch (error) {
+    console.error('Scheduled free model collection failed:', error);
+  }
+}
+
+// Free model benchmark task
+async function runBenchmarkFreeModels(env) {
+  try {
+    const refresher = new FreeModelRefresher({ env });
+    
+    // Check if we have recent benchmark data
+    const benchmarkData = await refresher.getTopModelsForBenchmark();
+    if (!benchmarkData || benchmarkData.length === 0) {
+      console.log('No benchmark data available, skipping benchmark run');
+      return;
+    }
+    
+    console.log('Running scheduled free model benchmark...');
+    await refresher.benchmarkTopModels();
+    
+  } catch (error) {
+    console.error('Scheduled free model benchmark failed:', error);
+  }
+}
