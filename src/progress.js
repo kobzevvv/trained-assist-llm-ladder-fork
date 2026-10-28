@@ -3,7 +3,7 @@
 const CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_EVENTS = 128;
 const TTL_MS = 60 * 60 * 1000;
-const EVENT_TYPES = new Set(['started', 'rung_selected', 'retrying', 'failover', 'completed', 'failed']);
+const EVENT_TYPES = new Set(['started', 'rung_selected', 'retrying', 'failover', 'context_optimized', 'completed', 'failed']);
 
 async function sha256(value) {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
@@ -31,6 +31,9 @@ function safeEvent(event) {
   if (typeof event.reason === 'string' && /^[a-z_]{1,32}$/.test(event.reason)) safe.reason = event.reason;
   if (typeof event.model === 'string') safe.model = event.model.slice(0, 180);
   if (Number.isSafeInteger(event.retry_after_ms) && event.retry_after_ms >= 0) safe.retry_after_ms = event.retry_after_ms;
+  // #331 — context optimization telemetry: how much the pre-ladder split shrank the input.
+  if (Number.isSafeInteger(event.tokens_before) && event.tokens_before > 0) safe.tokens_before = event.tokens_before;
+  if (Number.isSafeInteger(event.tokens_after) && event.tokens_after >= 0) safe.tokens_after = event.tokens_after;
   return safe;
 }
 

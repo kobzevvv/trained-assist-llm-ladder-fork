@@ -21,6 +21,7 @@ import { estimateTokens, estimateInputTokens, hedgePlan, ttfbFactor, GO_CONTEXT,
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown, abandonQueuedTasks } from './zen-ring.js';
 import { isEmptyAnswer } from './answer-guard.js';
 import { resolveProviderPool } from './provider-credentials.js';
+import { optimizeContext } from './context-optimizer.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -1001,6 +1002,31 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   } else {
     rungs = live.length ? live : keyed;
   }
+
+  // ── Pre-Ladder Context Optimization (#331) ───────────────────────────────────────────
+  // If the input exceeds 80K tokens, split the history into chunks, ask the first free Go
+  // rung to summarize each chunk's relevance, and replace the prompt with a compact version.
+  // This keeps the free tier from dying on oversized contexts (measured: 21 of 28
+  // `no first token in time` refusals were on payloads ≥ 100 KB).
+  // Fail-open: if the optimizer throws or returns nothing, the original body is used.
+  const initialTokens = estimateTokens(body);
+  if (initialTokens > 80_000) {
+    const firstFreeRung = rungs.find(m => m.startsWith('opencode-go/') && m.endsWith('-free'));
+    if (firstFreeRung) {
+      try {
+        const optimized = await optimizeContext(body, env, fetchImpl, firstFreeRung, attempt);
+        if (optimized !== body) {
+          body = optimized;
+          reportProgress(onProgress, { type: 'context_optimized', rung: firstFreeRung,
+            tokens_before: initialTokens, tokens_after: estimateTokens(optimized) });
+        }
+      } catch (e) {
+        // Optimization is a best-effort pre-step: a failure here must not poison the request.
+        console.error('[context-optimizer] failed, proceeding with original:', e && e.message);
+      }
+    }
+  }
+
   let keyIndex = Math.min(snap.keys.active || 0, Math.max(0, pool.length - 1));
   // Free Go rungs rotate across the pool (owner 2026-10-03: «го фрии модели шли каруселью всё
   // время по одному запросу по очереди перебирая аккаунты»). When the ladder OPENS on a free rung

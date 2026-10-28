@@ -76,3 +76,38 @@ test('HTTP endpoint drops the retired compression flag and returns no compressio
   assert.deepEqual(calls[0].messages, input.messages);
   assert.equal(Object.hasOwn(calls[0], 'ladder_context_compression'), false);
 });
+
+// Pre-Ladder Context Optimization (#331): a big HISTORY + a small fresh question is split and
+// summarized by the first free Go rung BEFORE the ladder tries its first step. The fetchImpl
+// distinguishes map calls (the "context filter" prompt) from the final answer call.
+test('oversized history is summarized before the first rung, and the reduced prompt reaches the free rung', async () => {
+  const question = 'what did we decide about the cache?';
+  // ~100 assistant turns of 4 KB each ≈ 400 KB ≈ 100K tokens of history — over the 80K threshold.
+  const history = Array.from({ length: 100 }, (_, i) => ({ role: 'assistant', content: `turn ${i}: ${'x'.repeat(4000)}` }));
+  const input = { model: 'service', messages: [
+    { role: 'system', content: 'be concise' },
+    ...history,
+    { role: 'user', content: question },
+  ] };
+  const seen = [];
+  const result = await run(input, { env, config, store: memoryStore(), fetchImpl: async (_url, init) => {
+    const outgoing = JSON.parse(init.body);
+    seen.push(outgoing);
+    const firstMsg = outgoing.messages[0] && outgoing.messages[0].content;
+    if (typeof firstMsg === 'string' && firstMsg.includes('context filter')) {
+      return new Response(JSON.stringify(completion('SUMMARY: decided to cache by key')), { status: 200 });
+    }
+    return new Response(JSON.stringify(completion('final answer')), { status: 200 });
+  } });
+
+  assert.equal(result.ok, true);
+  const mapCalls = seen.filter(o => typeof o.messages[0]?.content === 'string' && o.messages[0].content.includes('context filter'));
+  const finalCalls = seen.filter(o => !(typeof o.messages[0]?.content === 'string' && o.messages[0].content.includes('context filter')));
+  assert.ok(mapCalls.length > 1, `expected multiple map calls, got ${mapCalls.length}`);
+  assert.equal(finalCalls.length, 1, 'after optimization exactly one final call reaches the ladder');
+  // The final call is small and carries the summaries + the verbatim question.
+  const finalMessages = finalCalls[0].messages;
+  assert.ok(new TextEncoder().encode(JSON.stringify(finalMessages)).length < 80_000, 'reduced prompt is under the threshold');
+  assert.equal(finalMessages.find(m => m.role === 'user').content, question);
+  assert.ok(finalMessages.some(m => m.role === 'system' && m.content.includes('decided to cache by key')), 'summary survived into the final prompt');
+});

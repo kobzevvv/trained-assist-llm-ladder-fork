@@ -87,6 +87,24 @@ test('SSE replays after Last-Event-ID, keeps sequential ids, and redacts unappro
   assert.doesNotMatch(body, /private prompt|secret|raw_error/);
 });
 
+test('context_optimized event survives with tokens_before/after, redacts prompt', async () => {
+  const db = progressDb();
+  const recorder = await createProgressRecorder(db, ID, OWNER);
+  recorder.publish({ type: 'context_optimized', rung: 'free/first', tokens_before: 101099, tokens_after: 86, prompt: 'private' });
+  recorder.publish({ type: 'completed', model: 'free/first', attempt: 1 });
+  await recorder.flush();
+
+  const request = new Request(`https://ladder.test/v1/calls/${ID}/events`, {
+    headers: { authorization: 'Bearer shared-token', 'x-ladder-progress-token': OWNER },
+  });
+  const response = await progressEventsResponse(request, { LADDER_TRACE_DB: db }, ID);
+  const body = await response.text();
+  assert.match(body, /event: context_optimized/);
+  assert.match(body, /"tokens_before":101099/);
+  assert.match(body, /"tokens_after":86/);
+  assert.doesNotMatch(body, /"prompt"/);
+});
+
 test('shared bearer or guessed call id cannot read another caller progress', async () => {
   const db = progressDb();
   const recorder = await createProgressRecorder(db, ID, OWNER);
