@@ -629,6 +629,42 @@ export function markdownReport(run) {
   return L.join('\n');
 }
 
+// ── Availability probe history ────────────────────────────────────────────────────────────
+// readFreeModelAvailability: observed free-model reliability over a rolling window.
+// Skipped probes (e.g. missing credentials) are reported but excluded from rates.
+export async function readFreeModelAvailability(db, { since = 0 } = {}) {
+  if (!db) return { providers: {}, models: [] };
+  const { results = [] } = await db.prepare(
+    'SELECT provider, model_id, status, checked_at FROM free_model_probe_history '
+    + 'WHERE checked_at >= ?1 ORDER BY checked_at DESC'
+  ).bind(since).all();
+
+  const byProvider = {};
+  const models = [];
+  for (const r of results) {
+    const p = byProvider[r.provider] || { observations: 0, serving: 0, errors: 0, responding: 0 };
+    p.observations++;
+    if (r.status === 'ok') { p.serving++; p.responding++; }
+    else if (r.status === 'limited') { p.responding++; }
+    else if (r.status.startsWith('http_')) { p.errors++; p.responding++; }
+    byProvider[r.provider] = p;
+
+    const m = models.find((m) => m.provider === r.provider && m.model_id === r.model_id) ||
+      { provider: r.provider, model_id: r.model_id, observations: 0, serving: 0, http_errors: 0 };
+    m.observations++;
+    if (r.status === 'ok') m.serving++;
+    if (r.status.startsWith('http_')) m.http_errors++;
+    const idx = models.findIndex((m) => m.provider === r.provider && m.model_id === r.model_id);
+    if (idx >= 0) models[idx] = m;
+    else models.push(m);
+  }
+  for (const p of Object.values(byProvider)) {
+    p.serving_percent = p.observations ? Math.round(100 * p.serving / p.observations) : 0;
+    p.responding_percent = p.observations ? Math.round(100 * p.responding / p.observations) : 0;
+  }
+  return { providers: byProvider, models };
+}
+
 export class FreeModelRefresher {
   constructor(options = {}) {
     this.env = options.env;
