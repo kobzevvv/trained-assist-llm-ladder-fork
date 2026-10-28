@@ -32,8 +32,8 @@ test('estimateTokens: a token count without talking to a provider', () => {
 // contextOf: one place decides whether a rung may receive a request. Three sources, in
 // priority — Go ceilings (measured), OpenRouter catalog (D1), null = unknown = do not filter.
 test('contextOf: Go ceilings, OpenRouter catalog, unknown → null', () => {
-  assert.equal(contextOf('opencode-go/beam-free', {}), 100_000, 'Go beam-free = 100K');
-  assert.equal(contextOf('opencode-go/unknown-model', {}), 100_000, 'unknown Go model → 100K floor');
+  assert.equal(contextOf('opencode-go/beam-free', {}), 900_000, 'Go beam-free = 900K (measured max 1M)');
+  assert.equal(contextOf('opencode-go/unknown-model', {}), 900_000, 'unknown Go model → 900K floor');
   assert.equal(contextOf('openrouter/x/y:free', { 'openrouter/x/y:free': 512_000 }), 512_000,
     'OpenRouter from the catalog');
   assert.equal(contextOf('openrouter/x/y:free', {}), null,
@@ -52,8 +52,8 @@ test('canFitTokens: null window never refuses, a known window does', () => {
   assert.equal(canFitTokens('openrouter/x/y:free', 300_000, cat), false, 'over the 256K window');
   assert.equal(canFitTokens('openrouter/unknown:free', 5_000_000, cat), true,
     'unknown window → never refuse, even at 5M');
-  assert.equal(canFitTokens('opencode-go/beam-free', 90_000), true, 'Go under 100K');
-  assert.equal(canFitTokens('opencode-go/beam-free', 100_001), false, 'Go over 100K');
+  assert.equal(canFitTokens('opencode-go/beam-free', 800_000), true, 'Go under 900K');
+  assert.equal(canFitTokens('opencode-go/beam-free', 900_001), false, 'Go over 900K');
 });
 
 // The owner's bands (2026-10-07): a small context gets a small budget, a mid-size request is

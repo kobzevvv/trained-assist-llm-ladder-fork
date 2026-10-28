@@ -40,7 +40,7 @@ export function estimateTokens(body) {
 
 // ── Context windows ──────────────────────────────────────────────────────────────────────────
 // One place decides whether a rung may receive a request. Three sources, in priority:
-//   1. opencode-go — measured ceiling (GO_CONTEXT in ladder.js, all 100K). The ladder
+//   1. opencode-go — measured ceiling (GO_CONTEXT in size-policy.js, all 900K). The ladder
 //      already skips rungs over it; this module just names the contract.
 //   2. openrouter — the catalog's `context` column (256K / 512K / 1M per model, or
 //      null when the provider has not published one). Loaded by the caller from D1;
@@ -54,7 +54,7 @@ export function estimateTokens(body) {
 // the request is wrong for it, the model is fine.
 export function contextOf(model, catalog = {}) {
   if (model.startsWith('opencode-go/')) {
-    return GO_CONTEXT[model] || 100_000;
+    return GO_CONTEXT[model] || 900_000;
   }
   if (model.startsWith('openrouter/')) {
     const ctx = catalog[model];
@@ -72,19 +72,37 @@ export function canFitTokens(model, tokens, catalog = {}) {
   return ctx === null || tokens <= ctx;
 }
 
-// Static Go ceilings — kept here so size-policy can answer "is this a Go model" without
-// importing ladder.js (which would close the import cycle: ladder imports size-policy).
+// Go context ceilings. Measured 2026-10-28 over 7 days of ladder_calls.tokens_in (the
+// provider's own counter) for successful calls — the provider never publishes a context
+// window for opencode-go (catalog rows carry null), so these are the highest INPUT the
+// model was observed to answer, not a spec number:
+//
+//   модель                      макс. успешный вход   вызовов >100K
+//   beam-free                   1 016 297             6 418
+//   mimo-v2.6-flash               577 938             1 052
+//   deepseek-v4-pro               619 549               866
+//   minimax-m3.1-flash-free       252 271             13 750
+//   cat-jam-free                  483 278               2 827
+//   longcat-2.5-preview-free      229 160               1 186
+//
+// The old 100K came from issue #38, where it was a rate-limit ceiling (a 429 at ~123K),
+// not a context ceiling. Treating it as a context ceiling was wrong: it refused ~26 000
+// working calls a week.
+//
+// 900K is the floor under the observed maxima, with room for the Russian-language overhead
+// (Cyrillic tokenises at ~2.5 chars/token instead of 4, so a 900K ceiling covers ~2.25M
+// raw bytes). Per-model ceilings are a follow-up — this is the single number for now.
 export const GO_CONTEXT = Object.freeze({
-  'opencode-go/beam-free': 100_000,
-  'opencode-go/mimo-v2.6-flash': 100_000,
-  'opencode-go/qwen3.8-flash': 100_000,
-  'opencode-go/deepseek-v4-pro': 100_000,
-  'opencode-go/mimo-v2.6-flash-free': 100_000,
-  'opencode-go/mimo-v2.5-free': 100_000,
-  'opencode-go/qwen3.7-plus': 100_000,
-  'opencode-go/deepseek-v4.1-flash': 100_000,
-  'opencode-go/glm-5.3-flash': 100_000,
-  'opencode-go/space-bunny-free': 100_000,
+  'opencode-go/beam-free': 900_000,
+  'opencode-go/mimo-v2.6-flash': 900_000,
+  'opencode-go/qwen3.8-flash': 900_000,
+  'opencode-go/deepseek-v4-pro': 900_000,
+  'opencode-go/mimo-v2.6-flash-free': 900_000,
+  'opencode-go/mimo-v2.5-free': 900_000,
+  'opencode-go/qwen3.7-plus': 900_000,
+  'opencode-go/deepseek-v4.1-flash': 900_000,
+  'opencode-go/glm-5.3-flash': 900_000,
+  'opencode-go/space-bunny-free': 900_000,
 });
 
 // ── TTFB ─────────────────────────────────────────────────────────────────────────────────────
