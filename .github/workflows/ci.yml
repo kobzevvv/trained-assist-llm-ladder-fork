@@ -117,7 +117,13 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/migrations/0017_context_pre_filter.sql --remote
+        # Same rule as 0014: a duplicate-column error means it is already applied — verify
+        # the column really exists instead of failing the deploy.
+        run: |
+          set -euo pipefail
+          if ! npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/migrations/0017_context_pre_filter.sql --remote; then
+            npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --command "SELECT name FROM pragma_table_info('ladder_calls') WHERE name = 'estimated_tokens_in'" --remote --json | grep -q 'estimated_tokens_in'
+          fi
       - name: Apply free-model probe history schema (#259)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
