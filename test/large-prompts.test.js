@@ -82,7 +82,9 @@ test('HTTP endpoint drops the retired compression flag and returns no compressio
 // distinguishes map calls (the "context filter" prompt) from the final answer call.
 test('oversized history is summarized before the first rung, and the reduced prompt reaches the free rung', async () => {
   const question = 'what did we decide about the cache?';
-  // ~100 assistant turns of 4 KB each ≈ 400 KB ≈ 100K tokens of history — over the 80K threshold.
+  // ~100 assistant turns of 4 KB each ≈ 400 KB ≈ 100K tokens of history.
+  // Force optimizer with a small limit via env override (staging mode).
+  const testEnv = { ...env, LADDER_CONTEXT_OPTIMIZER_LIMIT: '20000' };
   const history = Array.from({ length: 100 }, (_, i) => ({ role: 'assistant', content: `turn ${i}: ${'x'.repeat(4000)}` }));
   const input = { model: 'service', messages: [
     { role: 'system', content: 'be concise' },
@@ -90,7 +92,7 @@ test('oversized history is summarized before the first rung, and the reduced pro
     { role: 'user', content: question },
   ] };
   const seen = [];
-  const result = await run(input, { env, config, store: memoryStore(), fetchImpl: async (_url, init) => {
+  const result = await run(input, { env: testEnv, config, store: memoryStore(), fetchImpl: async (_url, init) => {
     const outgoing = JSON.parse(init.body);
     seen.push(outgoing);
     const firstMsg = outgoing.messages[0] && outgoing.messages[0].content;
