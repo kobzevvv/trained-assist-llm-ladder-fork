@@ -1,0 +1,109 @@
+name: auto-benchmark-on-catalog-change
+# Автоматический запуск бенчмарков при изменениях в каталоге бесплатных моделей (issue #335).
+#
+# Этот workflow запускается:
+#   - по расписанию (каждые 6 часов)
+#   - вручную (workflow_dispatch)
+#
+# Логика:
+#   1. Проверяет изменения в каталоге (appeared/gone)
+#   2. Если есть изменения — запускает бенчмарки для новых/устаревших моделей
+#   3. Записывает результаты в D1
+#   4. Отправляет отчет в GitHub Actions summary
+#
+# Почему это отдельно от collect-free-models.yml:
+#   - Тот workflow собирает инвентарь каждые 4 часа
+#   - Этот workflow фокусируется на бенчмарках и запускается реже
+#   - Разделение позволяет независимо настраивать частоту
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force benchmark even if no changes detected"
+        default: "false"
+      dry_run:
+        description: "Collect + diff only, do not write to the table"
+        default: "false"
+      probe_limit:
+        description: "Max models to probe per run"
+        default: "20"
+  schedule:
+    # Каждые 6 часов, в :27 (не совпадает с collect-free-models.yml в :13)
+    - cron: '27 */6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  detect-and-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Detect catalog changes
+        id: detect
+        run: |
+          set -euo pipefail
+          # Собираем каталог без проб и бенчмарков, только для детекта изменений
+          node scripts/collect-free-models.mjs \
+            --probe false \
+            --dry-run true \
+            --json > catalog-diff.json
+
+          # Проверяем изменения
+          APPEARED=$(jq '.diff.appeared | length' catalog-diff.json)
+          GONE=$(jq '.diff.gone | length' catalog-diff.json)
+          CHANGED=$(jq '.diff.changed | length' catalog-diff.json)
+
+          echo "appeared=$APPEARED" >> "$GITHUB_OUTPUT"
+          echo "gone=$GONE" >> "$GITHUB_OUTPUT"
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+
+          if [ "$APPEARED" -gt 0 ] || [ "$GONE" -gt 0 ]; then
+            echo "changes_detected=true" >> "$GITHUB_OUTPUT"
+            echo "Changes detected: appeared=$APPEARED, gone=$GONE, changed=$CHANGED"
+          else
+            echo "changes_detected=false" >> "$GITHUB_OUTPUT"
+            echo "No catalog changes detected"
+          fi
+
+      - name: Run benchmarks for changed models
+        if: steps.detect.outputs.changes_detected == 'true' || github.event.inputs.force == 'true'
+        env:
+          LLM_LADDER_TOKEN: ${{ secrets.LLM_LADDER_TOKEN }}
+          PROBE_LIMIT: ${{ github.event.inputs.probe_limit || '20' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          # Запускаем полный сбор с пробами и бенчмарками
+          node scripts/collect-free-models.mjs \
+            --probe true \
+            --probe-limit "$PROBE_LIMIT" \
+            --dry-run "$DRY_RUN" \
+            --out benchmark-results.md | tee benchmark.log
+
+          printf '\n## Auto-benchmark results\n\n' >> "$GITHUB_STEP_SUMMARY"
+          printf '**Triggered by:** catalog change (appeared=%s, gone=%s)\n\n' \
+            "${{ steps.detect.outputs.appeared }}" "${{ steps.detect.outputs.gone }}" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$(cat benchmark-results.md)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No changes
+        if: steps.detect.outputs.changes_detected == 'false' && github.event.inputs.force != 'true'
+        run: |
+          echo "No catalog changes detected, skipping benchmarks" >> "$GITHUB_STEP_SUMMARY"
+          echo "Use workflow_dispatch with force=true to run benchmarks anyway"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: auto-benchmark-results
+          path: |
+            catalog-diff.json
+            benchmark-results.md
+            benchmark.log
+          if-no-files-found: ignore

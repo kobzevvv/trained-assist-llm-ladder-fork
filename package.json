@@ -9,6 +9,8 @@
     "diagnose": "node scripts/diagnose-failure.mjs",
     "test": "node --test test/*.test.js",
     "test:sandbox": "bash scripts/sandbox/sticky-rung.sh",
+    "test:sandbox:monitoring": "node scripts/sandbox/monitoring-sandbox.mjs",
+    "monitor:errors": "python3 scripts/monitor-error-rates.py",
     "gate": "node scripts/live-gate.mjs",
     "collect": "node scripts/collect-free-models.mjs",
     "sync-opencode": "node scripts/sync-opencode-ladder-models.mjs",

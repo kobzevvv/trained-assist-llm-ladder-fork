@@ -1,0 +1,105 @@
+name: monitor-error-rates
+# Мониторинг частоты ошибок по моделям (issue #335).
+#
+# Этот workflow запускается:
+#   - по расписанию (каждые 6 часов)
+#   - вручную (workflow_dispatch)
+#
+# Логика:
+#   1. Собирает метрики ошибок из ladder_calls за последние 24 часа
+#   2. Сравнивает с предыдущим периодом
+#   3. Обнаруживает изменения в частоте ошибок
+#   4. При критических изменениях отправляет уведомление
+#   5. Записывает метрики в error_metrics_history для трендов
+#
+# Зачем это нужно:
+#   - PR #333 добавил контекстный пре-фильтр, но нет мониторинга его эффективности
+#   - Нужно отслеживать, изменилось ли распределение ошибок по размерам запросов
+#   - Автоматическое обнаружение регрессий в частоте ошибок
+
+on:
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: "Threshold for error rate change detection (0.0-1.0)"
+        default: "0.1"
+      period_hours:
+        description: "Period in hours to analyze"
+        default: "24"
+  schedule:
+    # Каждые 6 часов, в :43 (не совпадает с другими workflow)
+    - cron: '43 */6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Analyze error rates
+        id: analyze
+        run: |
+          set -euo pipefail
+          THRESHOLD="${{ github.event.inputs.threshold || '0.1' }}"
+          PERIOD_HOURS="${{ github.event.inputs.period_hours || '24' }}"
+
+          # Запускаем анализ через Python скрипт
+          python3 scripts/monitor-error-rates.py \
+            --threshold "$THRESHOLD" \
+            --period-hours "$PERIOD_HOURS" \
+            --format json > error-metrics.json
+
+          # Извлекаем ключевые метрики
+          MODELS=$(jq '.models | length' error-metrics.json)
+          CHANGES=$(jq '.changes | length' error-metrics.json)
+          CRITICAL=$(jq '[.changes[] | select(.severity == "critical")] | length' error-metrics.json)
+
+          echo "models=$MODELS" >> "$GITHUB_OUTPUT"
+          echo "changes=$CHANGES" >> "$GITHUB_OUTPUT"
+          echo "critical=$CRITICAL" >> "$GITHUB_OUTPUT"
+
+          # Генерируем markdown отчет
+          python3 scripts/monitor-error-rates.py \
+            --threshold "$THRESHOLD" \
+            --period-hours "$PERIOD_HOURS" \
+            --format markdown > error-report.md
+
+          cat error-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send notification for critical changes
+        if: steps.analyze.outputs.critical > 0 && env.TELEGRAM_BOT_TOKEN != ''
+        run: |
+          set -euo pipefail
+          CRITICAL_COUNT="${{ steps.analyze.outputs.critical }}"
+          CHANGES_COUNT="${{ steps.analyze.outputs.changes }}"
+
+          # Формируем сообщение
+          MESSAGE="⚠️ Ladder Error Monitor: обнаружено ${CRITICAL_COUNT} критических изменений в частоте ошибок (всего изменений: ${CHANGES_COUNT})"
+
+          # Отправляем в Telegram
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="${MESSAGE}" \
+            -d parse_mode="Markdown" \
+            -d disable_web_page_preview="true"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: error-metrics
+          path: |
+            error-metrics.json
+            error-report.md
+          if-no-files-found: ignore

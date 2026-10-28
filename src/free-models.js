@@ -720,6 +720,55 @@ export async function collectFreeModels(env, db, {
   }
 
   const diff = diffRows(prev, next, { okProviders });
+
+  // Issue #335: запись изменений каталога в journal для истории и алертинга.
+  // Автоматический запуск бенчмарка для новых Go моделей уже выполняется
+  // в блоке benchmarkGo выше (строки 656-669), который бенчмарчит все
+  // неизвестные/устаревшие модели.
+  const catalogChanges = [];
+  if (write) {
+    // Определяем, какие модели были забенчмарчены в этом запуске
+    const benchmarkedModels = new Set(benchmarks.map(b => b.model_id));
+
+    for (const row of diff.appeared) {
+      catalogChanges.push({
+        provider: row.provider,
+        change_type: 'appeared',
+        model_id: row.model_id,
+        details: JSON.stringify({ context: row.context, name: row.name }),
+        benchmark_triggered: benchmarkedModels.has(row.model_id) ? 1 : 0,
+      });
+    }
+    for (const row of diff.gone) {
+      catalogChanges.push({
+        provider: row.provider,
+        change_type: 'gone',
+        model_id: row.model_id,
+        details: JSON.stringify({ name: row.name }),
+        benchmark_triggered: 0,
+      });
+    }
+    for (const change of diff.changed) {
+      catalogChanges.push({
+        provider: change.provider,
+        change_type: 'changed',
+        model_id: change.model_id,
+        details: JSON.stringify({ fields: change.fields }),
+        benchmark_triggered: 0,
+      });
+    }
+
+    // Записываем изменения в catalog_changes
+    if (catalogChanges.length > 0) {
+      const changeStatements = catalogChanges.map(c => ({
+        sql: `INSERT INTO catalog_changes (detected_at, provider, change_type, model_id, details, benchmark_triggered)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+        params: [now, c.provider, c.change_type, c.model_id, c.details, c.benchmark_triggered],
+      }));
+      await runStatements(db, changeStatements);
+    }
+  }
+
   return {
     started_at: new Date(now).toISOString(),
     finished_at: new Date().toISOString(),
@@ -733,6 +782,7 @@ export async function collectFreeModels(env, db, {
     probe_events_written: write ? probeEvents.length : 0,
     diff,
     rows,
+    catalog_changes: catalogChanges.length,
   };
 }
 
