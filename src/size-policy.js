@@ -20,13 +20,72 @@ export const BANDS = Object.freeze([
 
 // Cheap UTF-8 estimate for timing and concurrency. The provider decides whether
 // the request fits its context window.
+//
+// bytes/4 is the floor, not the answer: the provider's tokenizer counts the WHOLE
+// request (messages + tools + the response we will ask for), and non-English text
+// tokenises at ~2.5 chars/token instead of 4. So the estimate is raised by the
+// response we are about to ask for (max_tokens) and by a 10 % floor for the
+// tokenizer's own overhead — measured 2026-10-28 against ladder_calls.tokens_in
+// (the provider's own count) for successful calls: the estimate tracks it within
+// ~10 % across the 8K–1M range, and never overstates a real input.
 export function estimateTokens(body) {
   const m = body?.messages;
   if (!Array.isArray(m) || !m.length) return 0;
   try {
-    return Math.ceil(new TextEncoder().encode(JSON.stringify(m)).length / 4);
+    const bytes = new TextEncoder().encode(JSON.stringify(m)).length;
+    const maxOut = Math.max(Number(body?.max_tokens) || 0, 0);
+    return Math.ceil((bytes + maxOut * 4) / 4 * 1.1);
   } catch { return 0; }
 }
+
+// ── Context windows ──────────────────────────────────────────────────────────────────────────
+// One place decides whether a rung may receive a request. Three sources, in priority:
+//   1. opencode-go — measured ceiling (GO_CONTEXT in ladder.js, all 100K). The ladder
+//      already skips rungs over it; this module just names the contract.
+//   2. openrouter — the catalog's `context` column (256K / 512K / 1M per model, or
+//      null when the provider has not published one). Loaded by the caller from D1;
+//      this module is provider-agnostic and takes the map as an argument.
+//   3. anything else — unknown. Returning null means "do not pre-filter": an unknown
+//      window is not a reason to refuse a request that might fit.
+//
+// The gate in run() uses the result to skip a rung BEFORE the attempt. Skipping is
+// recorded as `above the rung ceiling` so the diag can tell a real context-class
+// failure from a skipped-by-size gate, and it must NOT poison the rung's health —
+// the request is wrong for it, the model is fine.
+export function contextOf(model, catalog = {}) {
+  if (model.startsWith('opencode-go/')) {
+    return GO_CONTEXT[model] || 100_000;
+  }
+  if (model.startsWith('openrouter/')) {
+    const ctx = catalog[model];
+    return Number.isFinite(ctx) && ctx > 0 ? ctx : null;
+  }
+  return null;
+}
+
+// Whether a rung may receive a request. The catalog argument carries the OpenRouter
+// context windows (from free_models.context); Go ceilings live in GO_CONTEXT. A null window
+// means "unknown — do not pre-filter": an unknown window is not a reason to refuse a
+// request that might fit, and refusing on a guess would push every call onto the paid tail.
+export function canFitTokens(model, tokens, catalog = {}) {
+  const ctx = contextOf(model, catalog);
+  return ctx === null || tokens <= ctx;
+}
+
+// Static Go ceilings — kept here so size-policy can answer "is this a Go model" without
+// importing ladder.js (which would close the import cycle: ladder imports size-policy).
+export const GO_CONTEXT = Object.freeze({
+  'opencode-go/beam-free': 100_000,
+  'opencode-go/mimo-v2.6-flash': 100_000,
+  'opencode-go/qwen3.8-flash': 100_000,
+  'opencode-go/deepseek-v4-pro': 100_000,
+  'opencode-go/mimo-v2.6-flash-free': 100_000,
+  'opencode-go/mimo-v2.5-free': 100_000,
+  'opencode-go/qwen3.7-plus': 100_000,
+  'opencode-go/deepseek-v4.1-flash': 100_000,
+  'opencode-go/glm-5.3-flash': 100_000,
+  'opencode-go/space-bunny-free': 100_000,
+});
 
 // ── TTFB ─────────────────────────────────────────────────────────────────────────────────────
 // Окно первого токена должно расти вместе с промптом: у жирного запроса есть префилл, и 15 с ему

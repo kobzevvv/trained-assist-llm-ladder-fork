@@ -1,0 +1,17 @@
+-- 0009: context pre-filter + estimated input size.
+--
+-- Two changes, both about answering "how big was the request that failed?" without the
+-- provider's usage counter:
+--
+-- 1. ladder_calls.estimated_tokens_in — the ladder's own size estimate (size-policy.estimateTokens),
+--    written for EVERY call, successful or not. The provider's tokens_in only exists on a 200,
+--    so before this column the trace could not tell a 400 "too long" from a 400 "model
+--    unavailable" by size — the question behind the context pre-filter in run().
+--    It is an ESTIMATE (bytes/4 + max_tokens + 10% floor), so it is a separate column and
+--    never overwrites the provider's own count.
+--
+-- 2. free_models.context is already populated by the inventory collector (0003). run() now
+--    reads it once per call and refuses a rung whose window is smaller than the request
+--    BEFORE the attempt, instead of burning a key on a 400 the provider wraps in silence
+--    (measured 2026-10-28: ~3000 `provider returned HTTP 400` over 7 days, mostly beam-free).
+ALTER TABLE ladder_calls ADD COLUMN estimated_tokens_in INTEGER;

@@ -29,15 +29,20 @@ export function makeTrace(request) {
 }
 
 const TRACE_SQL = `INSERT INTO ladder_calls
-  (ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, attempts, tokens_in, tokens_out, tokens_cached, tokens_cache_write, app, key_hash)
-  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)`;
+  (ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, attempts, tokens_in, tokens_out, tokens_cached, tokens_cache_write, estimated_tokens_in, app, key_hash)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)`;
 
 const SETTLE_STREAM_SQL = `UPDATE ladder_calls SET ok = ?1, ms = ?2, attempts = ?3,
-  tokens_in = ?4, tokens_out = ?5, tokens_cached = ?6, tokens_cache_write = ?7 WHERE rowid = ?8`;
+  tokens_in = ?4, tokens_out = ?5, tokens_cached = ?6, tokens_cache_write = ?7, estimated_tokens_in = ?8 WHERE rowid = ?9`;
 
+// estimated_tokens_in is the ladder's own size estimate (size-policy.estimateTokens), written
+// for EVERY call — successful or not. The provider's tokens_in only exists on a successful
+// response, so without this column the trace could not answer "how big were the requests that
+// failed with HTTP 400?" — the question behind the context pre-filter. It is an estimate, so
+// it is a separate column and never overwrites the provider's own count.
 function usageValues(r) {
   const usage = r.data?.usage;
-  if (!usage || typeof usage !== 'object') return [null, null, null, null];
+  if (!usage || typeof usage !== 'object') return [null, null, null, null, null];
   const details = usage.prompt_tokens_details || usage.input_tokens_details || {};
   const first = (...values) => values.find((value) => Number.isFinite(value) && value >= 0) ?? null;
   return [
@@ -45,6 +50,7 @@ function usageValues(r) {
     first(usage.completion_tokens, usage.output_tokens),
     first(details.cached_tokens, usage.cache_read_input_tokens, usage.prompt_cache_hit_tokens),
     first(details.cache_write_tokens, usage.cache_creation_input_tokens, usage.prompt_cache_miss_tokens),
+    Number.isFinite(r.estimated_tokens_in) ? r.estimated_tokens_in : null,
   ];
 }
 
@@ -63,7 +69,7 @@ export async function beginStreamCall(env, trace, ladder, r, started) {
     const result = await db.prepare(TRACE_SQL).bind(
       Date.now(), trace.traceId ?? null, trace.runId ?? null, trace.userId ?? null, trace.chatId ?? null,
       trace.sessionId ?? null, ladder, 0, r.model || null, Date.now() - started,
-      JSON.stringify(attempts), null, null, null, null, trace.app ?? null, trace.keyHash ?? null,
+      JSON.stringify(attempts), null, null, null, null, null, trace.app ?? null, trace.keyHash ?? null,
     ).run();
     const rowId = result?.meta?.last_row_id;
     return result?.success && Number.isSafeInteger(rowId) && rowId > 0 ? rowId : null;

@@ -16,7 +16,7 @@ export { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBe
 
 import { classifyError } from './classify.js';
 import { orAccountLimit, orAccountLimitOf, orParkUntil } from './or-limits.js';
-import { estimateTokens, hedgePlan, ttfbFactor } from './size-policy.js';
+import { estimateTokens, hedgePlan, ttfbFactor, GO_CONTEXT, canFitTokens } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown, abandonQueuedTasks } from './zen-ring.js';
 import { isEmptyAnswer } from './answer-guard.js';
 import { resolveProviderPool } from './provider-credentials.js';
@@ -78,25 +78,20 @@ export function minTokensFor(model) {
   return REASONING.has(model) ? REASONING_MIN_TOKENS : MIN_TOKENS;
 }
 
-// Context window for Go models (used in the ladder to skip rungs that cannot fit the input)
-// These are the measured context windows for opencode-go models that are part of the ladder:
-export const GO_CONTEXT = {
-  'opencode-go/beam-free': 100_000,
-  'opencode-go/mimo-v2.6-flash': 100_000,
-  'opencode-go/qwen3.8-flash': 100_000,
-  'opencode-go/deepseek-v4-pro': 100_000,
-  'opencode-go/mimo-v2.6-flash-free': 100_000,
-  'opencode-go/mimo-v2.5-free': 100_000,
-  'opencode-go/qwen3.7-plus': 100_000,
-  'opencode-go/deepseek-v4.1-flash': 100_000,
-  'opencode-go/glm-5.3-flash': 100_000,
-  'opencode-go/space-bunny-free': 100_000,
-};
-
-// Check if the model can handle the given number of tokens based on its context window
-export function canFitTokens(model, tokens) {
-  if (!model.startsWith('opencode-go/')) return true; // non-GO models have no context window constraint here
-  return tokens <= (GO_CONTEXT[model] || 100_000);
+// OpenRouter context windows, read from the free-model inventory. Fail-open: a D1 outage
+// must not turn every OpenRouter rung into a pre-filtered skip — an empty catalog means
+// "unknown window", which is exactly what contextOf() returns for openrouter/* anyway.
+export async function readOrContextCatalog(env) {
+  const db = env?.LADDER_TRACE_DB;
+  if (!db) return {};
+  try {
+    const { results = [] } = await db.prepare(
+      'SELECT model_id, context FROM free_models WHERE provider = ? AND available = 1 AND context IS NOT NULL',
+    ).bind('openrouter').all();
+    const out = {};
+    for (const r of results) out[r.model_id] = Number(r.context);
+    return out;
+  } catch { return {}; }
 }
 
 export const DEFAULT_LADDER = 'service'; // legacy alias 'deepseek' resolves here (issue #49)
@@ -755,12 +750,16 @@ export function shouldRetryRingCall(result) {
  *   pin: 'new' | 'hit' | 'moved' | 'gone' | null — only set for keyed calls.
  */
 export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null, onProgress } = {}) {
+  // The ladder's own size estimate, computed once. It is returned on EVERY outcome —
+  // successful or not — so the trace can answer "how big were the requests that failed?"
+  // without needing the provider's usage counter, which only exists on a 200.
+  const estimatedTokensIn = estimateTokens(body);
   let all = rungsFor(config, body && body.model);
-  if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [] };
+  if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [], estimated_tokens_in: estimatedTokensIn };
   // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
   // through the worker without handing provider keys to the bench.
   if (pinRung) {
-    if (!all.includes(pinRung)) return { ok: false, status: 400, error: `rung not in ladder: ${pinRung}`, attempts: [] };
+    if (!all.includes(pinRung)) return { ok: false, status: 400, error: `rung not in ladder: ${pinRung}`, attempts: [], estimated_tokens_in: estimatedTokensIn };
     all = [pinRung];
   } else if (config?.zen_ring === false) {
     // The zen ring is switched OFF (config: "zen_ring": false). Its runners are not registered,
@@ -768,7 +767,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     // it moves on. The rungs STAY in the config: when the runners are back, turning the ring on is
     // one flag and the order of the ladders is exactly what it was.
     all = all.filter((m) => !m.startsWith('zen-rings/'));
-    if (!all.length) return { ok: false, status: 503, error: 'no rung left: the zen ring is switched off and the ladder has no other rung', attempts: [] };
+    if (!all.length) return { ok: false, status: 503, error: 'no rung left: the zen ring is switched off and the ladder has no other rung', attempts: [], estimated_tokens_in: estimatedTokensIn };
   }
   if (!pinRung && env?.LADDER_TRACE_DB) {
     // The Go block and the OpenRouter free block are ordered by the measured answer time; the
@@ -793,8 +792,13 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     : m.startsWith('zen-rings/') ? !!env.ZEN_DB
     : providerPool.openrouter.length > 0);
   const keyed = all.filter(hasKey);
-  if (!keyed.length) return { ok: false, status: 503, error: 'no provider key configured', attempts: [] };
+  if (!keyed.length) return { ok: false, status: 503, error: 'no provider key configured', attempts: [], estimated_tokens_in: estimatedTokensIn };
 
+  // OpenRouter context windows — the catalog's `context` column (256K / 512K / 1M per
+  // model, or null when the provider has not published one). Loaded once per call so the
+  // pre-filter below can refuse a rung whose window is smaller than the request BEFORE the
+  // attempt, instead of burning a key on a 400 the provider wraps in silence.
+  const orContextCatalog = await readOrContextCatalog(env);
   const snap = await store.snapshot(undefined, conversation);
   const now = Date.now();
   // OpenRouter ACCOUNT parks (issue #297): the free allowance is counted per account, so an account
@@ -908,7 +912,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     // the rung's health: the request is wrong for it, the model is fine (same rule as a context
     // overflow). The skip is recorded as `above the rung ceiling` so the diag can tell a real
     // context-class failure from a skipped-by-size gate.
-    if (!canFitTokens(model, rungInputTokens)) {
+    if (!canFitTokens(model, rungInputTokens, orContextCatalog)) {
       attempts.push({ model, outcome: 'skipped',
         error: `input ~${rungInputTokens}t above the rung ceiling` });
       continue;
@@ -1038,7 +1042,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       attempts.push({ model, outcome: 'ok', key });
       await store.recordSuccess(model, conversation && !pinRung ? { pin: { pinKey: conversation, rung: model } } : {});
       return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState,
-        };
+        estimated_tokens_in: estimatedTokensIn };
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
     previousFailedRung = model;
@@ -1051,7 +1055,8 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         await store.recordFailure(model, failureClass(r.error), { pinRemove: { pinKey: conversation, model } });
         pinState = 'gone';
         const m2 = /^HTTP[^\s]* (\d+)/.exec(r.error);
-        return { ok: false, status: m2 ? Number(m2[1]) : 502, error: r.error, attempts, pin: 'gone' };
+        return { ok: false, status: m2 ? Number(m2[1]) : 502, error: r.error, attempts, pin: 'gone',
+          estimated_tokens_in: estimatedTokensIn };
       }
       // An ACCOUNT-level OpenRouter limit is not a rung problem: the account is parked until its own
       // reset, and the rung must stay eligible for the accounts that still have allowance (#297).
@@ -1060,5 +1065,6 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       await store.recordFailure(model, accountLimit ? { cls: 'transient' } : failureClass(r.error));
     }
   }
-  return { ok: false, status: 502, error: 'every rung failed', attempts, pin: conversation ? pinState : null };
+  return { ok: false, status: 502, error: 'every rung failed', attempts, pin: conversation ? pinState : null,
+  estimated_tokens_in: estimatedTokensIn };
 }

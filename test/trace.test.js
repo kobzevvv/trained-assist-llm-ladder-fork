@@ -38,7 +38,7 @@ function fakeD1() {
 }
 
 function row(r) {
-  const cols = ['ts', 'trace_id', 'run_id', 'user_id', 'chat_id', 'session_id', 'ladder', 'ok', 'model', 'ms', 'attempts', 'tokens_in', 'tokens_out', 'tokens_cached', 'tokens_cache_write', 'app'];
+  const cols = ['ts', 'trace_id', 'run_id', 'user_id', 'chat_id', 'session_id', 'ladder', 'ok', 'model', 'ms', 'attempts', 'tokens_in', 'tokens_out', 'tokens_cached', 'tokens_cache_write', 'estimated_tokens_in', 'app'];
   return Object.fromEntries(cols.map((c, i) => [c, r[i]]));
 }
 
