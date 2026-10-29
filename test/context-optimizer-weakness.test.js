@@ -91,6 +91,33 @@ test('cross-chunk: getLastUserQuestion picks the LAST user turn even with earlie
   assert.equal(getLastUserQuestion(messages), 'fresh question');
 });
 
+test('history: earlier user turns are kept as chunked history, only the LAST is the question', async () => {
+  // Regression: filtering by role alone dropped every earlier user message —
+  // ~30% of a real multi-turn session (132 of 133 user messages) vanished.
+  const question = 'fresh question';
+  const history = [];
+  for (let i = 0; i < 20; i++) {
+    history.push({ role: 'user', content: `clarification ${i}: ${'u'.repeat(120)}` });
+    history.push({ role: 'assistant', content: `answer ${i}: ${'a'.repeat(120)}` });
+  }
+  const messages = [...history, { role: 'user', content: question }];
+  const body = { messages };
+  const prompts = [];
+  const attempt = async (_e, _m, b) => {
+    prompts.push(b.messages[0].content);
+    return { ok: true, content: 'SUMMARY: kept' };
+  };
+  const out = await optimizeContext(body, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
+  assert.ok(out !== body, 'optimization ran');
+  const allPrompts = prompts.join('\n');
+  assert.ok(allPrompts.includes('clarification 0'), 'early user turns reach the map phase');
+  assert.ok(allPrompts.includes('clarification 19'), 'late user turns reach the map phase');
+  // The question itself must not be duplicated into the chunked history.
+  const finalQuestion = out.messages.filter(m => m.role === 'user');
+  assert.equal(finalQuestion.length, 1, 'exactly one user question survives in the reduced prompt');
+  assert.equal(finalQuestion[0].content, question, 'the fresh question survives verbatim');
+});
+
 // ── 3. Boundary splitting: a message is never cut in half ────────────────────────────────
 test('boundary: no chunk ever splits a single message across two chunks', () => {
   const messages = historyMessages(12, 120);

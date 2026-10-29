@@ -110,8 +110,19 @@ export function reduceMessages(originalMessages, userQuestion, summaries) {
 // (single chunk, no free rung, or all chunks failed).
 // `chunkLimit` is injectable so tests can exercise the split path with a small limit.
 export async function optimizeContext(body, env, fetchImpl, firstFreeRung, attempt, chunkLimit = CHUNK_TOKEN_LIMIT) {
-  const userQuestion = getLastUserQuestion(body.messages);
-  const history = body.messages.filter(m => m.role !== 'user');
+  const messages = body.messages;
+  // History = everything except the LAST user turn. Earlier user turns are part of
+  // the conversation (clarifications, answers, follow-ups) and must be chunked,
+  // not dropped — filtering by role alone would discard ~30% of a multi-turn
+  // dialogue (measured: 132 of 133 user messages in a real recruiter session).
+  const lastUserIdx = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') return i;
+    }
+    return -1;
+  })();
+  const userQuestion = lastUserIdx >= 0 ? messages[lastUserIdx].content : '';
+  const history = lastUserIdx >= 0 ? messages.slice(0, lastUserIdx) : messages;
   const chunks = chunkMessages(history, chunkLimit);
 
   if (chunks.length <= 1) return body; // nothing to split
