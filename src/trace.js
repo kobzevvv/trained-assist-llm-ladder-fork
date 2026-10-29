@@ -41,8 +41,14 @@ const SETTLE_STREAM_SQL = `UPDATE ladder_calls SET ok = ?1, ms = ?2, attempts = 
 // failed with HTTP 400?" — the question behind the context pre-filter. It is an estimate, so
 // it is a separate column and never overwrites the provider's own count.
 function usageValues(r) {
+  // НАША оценка входа есть при ЛЮБОМ исходе и не зависит от того, вернул ли провайдер usage — у
+  // отказа его и нет. Раньше она стояла ВНУТРИ раннего выхода по отсутствию usage, поэтому
+  // терялась ровно там, где была нужна: за сутки в D1 не было НИ ОДНОГО отказа с est (0 из 464
+  // при 1188 из 1188 у успехов), хотя колонку добавляли именно чтобы отвечать «какими были
+  // упавшие запросы» (#333). Выносим вычисление ВЫШЕ проверки usage (#341).
+  const estimated = Number.isFinite(r.estimated_tokens_in) ? r.estimated_tokens_in : null;
   const usage = r.data?.usage;
-  if (!usage || typeof usage !== 'object') return [null, null, null, null, null];
+  if (!usage || typeof usage !== 'object') return [null, null, null, null, estimated];
   const details = usage.prompt_tokens_details || usage.input_tokens_details || {};
   const first = (...values) => values.find((value) => Number.isFinite(value) && value >= 0) ?? null;
   return [
@@ -50,7 +56,7 @@ function usageValues(r) {
     first(usage.completion_tokens, usage.output_tokens),
     first(details.cached_tokens, usage.cache_read_input_tokens, usage.prompt_cache_hit_tokens),
     first(details.cache_write_tokens, usage.cache_creation_input_tokens, usage.prompt_cache_miss_tokens),
-    Number.isFinite(r.estimated_tokens_in) ? r.estimated_tokens_in : null,
+    estimated,
   ];
 }
 
