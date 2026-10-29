@@ -12,15 +12,24 @@ test('safe attempt diagnostics preserve provider source and status without provi
     { model: 'zen-rings/model', outcome: 'error', error: 'zen-rings: warming up (3s left), private detail' },
   ]);
   assert.deepEqual(diagnostics, [
-    { model: 'openrouter/example/model:free', outcome: 'error', source: 'provider',
+    // `key` — ИНДЕКС в наше пуле (0..3), наше структурное поле: он доезжает (#341), а тело
+    // провайдера — нет.
+    { model: 'openrouter/example/model:free', outcome: 'error', key: 2, source: 'provider',
       reason_code: 'provider_http_error', http_status: 503, error: 'provider returned HTTP 503' },
     { model: 'opencode-go/model', outcome: 'error', source: 'provider',
       reason_code: 'provider_timeout', error: 'provider timed out' },
     { model: 'zen-rings/model', outcome: 'error', source: 'zen_pool',
       reason_code: 'provider_capacity', error: 'Zen worker capacity unavailable' },
   ]);
-  assert.equal(JSON.stringify(diagnostics).includes('private'), false);
-  assert.equal(JSON.stringify(diagnostics).includes('key'), false);
+  assert.equal(JSON.stringify(diagnostics).includes('private'), false, 'текст провайдера не течёт');
+  // Строже прежней строчной проверки: белый список полей. В D1 не может попасть ничего, кроме
+  // нашего скелета, даже если провайдер подсунет в попытку произвольное поле.
+  const ALLOWED = new Set(['model', 'outcome', 'key', 'source', 'reason_code', 'http_status', 'error']);
+  for (const attempt of diagnostics) {
+    for (const field of Object.keys(attempt)) assert.ok(ALLOWED.has(field), `неожиданное поле: ${field}`);
+  }
+  assert.deepEqual(diagnostics.map((d) => d.key), [2, undefined, undefined],
+    'индекс доезжает там, где он был, и не выдумывается там, где его не было');
 });
 
 test('real chat handler returns a stable provider outage and stores only sanitized diagnostics', async () => {
@@ -58,8 +67,11 @@ test('real chat handler returns a stable provider outage and stores only sanitiz
     assert.equal(body.error.service_status, 'operational');
     assert.equal(body.error.attempts.length, 1, 'pinned verification measures exactly one provider attempt');
     assert.deepEqual(body.error.attempts.map((attempt) => attempt.outcome), ['error']);
+    // `key` — индекс в пуле кредов (для Go — ключ, для OpenRouter — аккаунт), целое 0..N.
+    // Он наше структурное поле и теперь доезжает (#341); cred в попытке нет в принципе, и строка
+    // `not-a-real-key` ниже проверяет именно это.
     for (const attempt of body.error.attempts) assert.deepEqual(attempt, {
-      model: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', outcome: attempt.outcome,
+      model: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', outcome: attempt.outcome, key: 0,
       source: 'provider', reason_code: 'provider_timeout', error: 'provider timed out',
     });
     const storedAttempts = JSON.parse(traceRows[0][10]);
@@ -87,12 +99,46 @@ test('собственные причины лестницы доезжают д
     ['input is too long for the ring payload', 'input_too_long_for_ring_payload'],
   ];
   for (const [message, reason] of own) {
-    const out = safeAttemptDiagnostics([{ model: 'opencode-go/beam-free', outcome: 'skipped', key: 0, error: message }]);
+    // ВАЖНО про `key`: это ИНДЕКС в наше пуле (0..3), а не сам ключ — наше структурное поле,
+    // и он обязан доехать (#341). Креда в попытках не появляется в принципе, и защита от неё
+    // стала строже прежней: через санитайзер проходит только НЕОТРИЦАТЕЛЬНОЕ ЦЕЛОЕ, так что даже
+    // строка, случайно положенная в это поле, будет отброшена, а не записана в D1.
+    const out = safeAttemptDiagnostics([{
+      model: 'opencode-go/beam-free', outcome: 'skipped', key: 0,
+      api_key: 'sk-SECRET-MUST-NOT-LEAK', error: message,
+    }]);
     assert.deepEqual(out[0], {
-      model: 'opencode-go/beam-free', outcome: 'skipped',
+      model: 'opencode-go/beam-free', outcome: 'skipped', key: 0,
       source: 'ladder', reason_code: reason, error: message,
     }, `причина сохраняется дословно: ${message}`);
-    assert.equal(JSON.stringify(out[0]).includes('key'), false, 'ключ провайдера не течёт');
+    const dumped = JSON.stringify(out[0]);
+    assert.equal(dumped.includes('SECRET'), false, 'cred не течёт');
+    assert.equal(dumped.includes('api_key'), false, 'и его поле тоже');
+  }
+});
+
+// #341: индекс ключа — наше структурное поле, и без него в инциденте 2026-10-28 приходилось
+// восстанавливать, какие ключи садились, по модели-источнику 429. Он должен пережить и запись,
+// и повторное чтение из D1, и при этом в поле никогда не должно оказаться ничего, кроме целого.
+test('key-probe/key-rotated несут индекс ключа, и через санитайзер проходит только целое', () => {
+  const raw = [
+    { model: 'opencode-go/mimo-v2.6-flash', outcome: 'key-probe', key: 0, error: 'HTTP 403: <тело провайдера>' },
+    { model: 'opencode-go/mimo-v2.6-flash', outcome: 'key-rotated', key: 3, error: 'HTTP 429: usage limit' },
+    { model: 'opencode-go/beam-free', outcome: 'ok' },
+  ];
+  const out = safeAttemptDiagnostics(raw);
+  assert.equal(out[0].key, 0, 'индекс стартового ключа виден');
+  assert.equal(out[0].http_status, 403, 'и статус при этом не потерян');
+  assert.equal(out[1].key, 3, 'индекс ключа, на который ушли');
+  assert.equal(out[2].key, undefined, 'у ok-попытки индекса нет — не выдумываем');
+
+  // повторный проход (как делает /v1/calls) ничего не теряет
+  assert.equal(safeAttemptDiagnostics(out)[0].key, 0, 'идемпотентно по индексу');
+
+  // защита от креды: неправдоподобное значение в поле отбрасывается целиком
+  for (const bad of ['ghp_SECRET', 1.5, -1, null, undefined, { i: 0 }]) {
+    const r = safeAttemptDiagnostics([{ model: 'opencode-go/x', outcome: 'error', key: bad, error: 'HTTP 500: x' }])[0];
+    assert.equal('key' in r, false, `нецелое значение отброшено: ${JSON.stringify(bad)}`);
   }
 });
 
