@@ -501,6 +501,7 @@ async function adminUsersRoute(request, env, auth, pathname) {
           }
           return json(200, { user: { user_id: userId, email, role, status: 'active' }, existing: true });
         }
+        // Single-row insert: a concurrent duplicate user_id is caught below as 409.
         await db.prepare(`INSERT INTO identity_users (user_id, email, role, service, status, created_at, updated_at)
                           VALUES (?1, ?2, ?3, 'ladder', 'active', ?4, ?4)`)
           .bind(userId, email, role, now).run();
@@ -732,6 +733,11 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     return adminUsersRoute(request, env, auth, url.pathname);
   }
 
+  const progressRoute = /^\/v1\/calls\/([0-9a-f-]{36})\/events$/i.exec(url.pathname);
+  // Progress SSE is authenticated by the per-call progress token, not by the ladder
+  // token, so personal keys may read progress for their own requests.
+  if (request.method === 'GET' && progressRoute) return progressEventsResponse(request, env, progressRoute[1]);
+
   // Personal keys are for the user-facing model API only. Existing owner and legacy
   // service tokens retain the operational API surface; a personal key cannot read
   // aggregate analytics/state or trigger maintenance routes.
@@ -740,9 +746,6 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
         || (request.method === 'POST' && url.pathname === '/v1/chat/completions'))) {
     return oaError(403, 'endpoint is not available to personal keys', 'permission_error');
   }
-
-  const progressRoute = /^\/v1\/calls\/([0-9a-f-]{36})\/events$/i.exec(url.pathname);
-  if (request.method === 'GET' && progressRoute) return progressEventsResponse(request, env, progressRoute[1]);
 
   if (request.method === 'GET' && url.pathname === '/v1/models') {
     const data = [];
