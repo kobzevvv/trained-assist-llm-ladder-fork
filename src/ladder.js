@@ -442,10 +442,25 @@ const GO_ALLOWED_FIELDS = new Set([
   'stop', 'seed', 'user', 'metadata', 'service_tier',
 ]);
 
+// Поля, которые лестница выставляет сама или удаляет. Их клиентское значение подменяется, а не
+// теряется, поэтому в лог «отброшено» они не идут — иначе каждая нормальная заявка выглядела бы
+// как потеря.
+const LADDER_MANAGED_FIELDS = new Set(['model', 'stream', 'max_tokens', 'stream_options', 'ladder_cache_variant']);
+
 // Только известные поля — и ничего сверх. model/stream/max_tokens выставляет сама лестница ниже.
+//
+// Отсечение обязано быть НАБЛЮДАЕМЫМ: список собран замером, но шлюз может принимать и то, чего мы
+// не пробовали, и тогда клиент молча лишится работающего поля. Имена полей — не секреты, поэтому
+// они идут в лог, а значения не логируются вовсе. Увидели событие go-field-whitelist с именем —
+// добавили его в список и переверили.
 function pickGoFields(body) {
   const out = {};
-  for (const field of Object.keys(body || {})) if (GO_ALLOWED_FIELDS.has(field)) out[field] = body[field];
+  const dropped = [];
+  for (const field of Object.keys(body || {})) {
+    if (GO_ALLOWED_FIELDS.has(field)) out[field] = body[field];
+    else if (!LADDER_MANAGED_FIELDS.has(field)) dropped.push(field);
+  }
+  if (dropped.length) console.log(JSON.stringify({ route: 'go-field-whitelist', dropped }));
   return out;
 }
 

@@ -1133,11 +1133,27 @@ test('upstreamRequest: opencode-go получает только известн�
     user: 'trained-assist', metadata: { a: 'b' }, service_tier: 'auto',
   };
 
-  const go = upstreamRequest(env, 'opencode-go/beam-free', body, 0, {});
+  const logged = [];
+  const log = console.log;
+  console.log = (line) => logged.push(String(line));
+  let go;
+  try {
+    go = upstreamRequest(env, 'opencode-go/beam-free', body, 0, {});
+  } finally { console.log = log; }
+
   for (const dropped of ['top_k', 'min_p', 'repetition_penalty', 'n', 'logit_bias',
     'custom_id', 'store', 'parallel_tool_calls', 'prompt_cache']) {
     assert.equal(dropped in go.body, false, `opencode-go не должен получить ${dropped}`);
   }
+  // Отсечение обязано быть видимым: иначе клиент молча лишится работающего поля, а шлюз может
+  // принимать и то, чего мы не пробовали. В лог уходят ТОЛЬКО ИМЕНА, значения не логируются.
+  const whitelistLog = logged.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .find((e) => e && e.route === 'go-field-whitelist');
+  assert.ok(whitelistLog, 'отброшенные поля фиксируются в логе');
+  assert.deepEqual(whitelistLog.dropped.sort(),
+    ['custom_id', 'logit_bias', 'min_p', 'n', 'parallel_tool_calls', 'prompt_cache', 'repetition_penalty', 'store', 'top_k'].sort(),
+    'и перечислены по именам');
+  assert.equal(logged.join('').includes('"hi"'), false, 'значения полей в лог не попадают');
   for (const kept of ['messages', 'temperature', 'top_p', 'stop', 'seed', 'user', 'metadata', 'service_tier']) {
     assert.ok(kept in go.body, `opencode-go обязан получить ${kept}`);
   }
