@@ -21,6 +21,7 @@
 //                          // ранги; `exhausted` читают все, он остаётся местом для настоящих
 //                          // свойств АККАУНТА (мёртвый ключ, нет оплаты).
 //     or:     { parked: { [index]: <epoch ms until usable> } },
+//     pins:   { [pinKey]: { rung, lastUsedAt } }, // conversation pins (epic #17)
 //                          // the OPENROUTER credential pool's account parks (issue #297) — a
 //                          // separate namespace: `keys` belongs to the Go pool, and a Go key's
 //                          // exhaustion must never park an OpenRouter account (and back)
@@ -220,7 +221,7 @@ export function pinStats(pins, now = Date.now(), ttl = PIN_TTL_MS) {
 
 // In-memory store with the same async interface as the Durable Object — tests, local runs.
 export function memoryStore(poolSize = 0, initial = emptyState()) {
-  const state = initial;
+  const state = { ...initial, health: { ...(initial.health || {}) }, keys: { ...(initial.keys || {}) }, or: { ...(initial.or || {}) }, pins: { ...(initial.pins || {}) } };
   return {
     state,
     async snapshot(poolSizeArg, pinKey) {

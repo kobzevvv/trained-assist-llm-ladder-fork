@@ -69,13 +69,13 @@ export class LadderState extends DurableObject {
     let count = 0;
     try {
       const now = Date.now();
-      const { keys } = await this.ctx.storage.list({ prefix: PIN_PREFIX });
-      for (const k of keys) {
-        if (S.pinFresh(k.value, now)) {
+      const list = await this.ctx.storage.list({ prefix: PIN_PREFIX });
+      for (const [name, value] of list) {
+        if (S.pinFresh(value, now)) {
           count++;
-          byRung[k.value.rung] = (byRung[k.value.rung] || 0) + 1;
+          byRung[value.rung] = (byRung[value.rung] || 0) + 1;
         } else {
-          await this.ctx.storage.delete(k.name); // opportunistic cleanup
+          await this.ctx.storage.delete(name); // opportunistic cleanup
         }
       }
     } catch { /* fail-open: report zeros rather than fail /v1/state */ }
@@ -92,8 +92,8 @@ export class LadderState extends DurableObject {
     this._sweepOps = 0;
     try {
       const now = Date.now();
-      const { keys } = await this.ctx.storage.list({ prefix: PIN_PREFIX });
-      for (const k of keys) if (!S.pinFresh(k.value, now)) await this.ctx.storage.delete(k.name);
+      const list = await this.ctx.storage.list({ prefix: PIN_PREFIX });
+      for (const [name, value] of list) if (!S.pinFresh(value, now)) await this.ctx.storage.delete(name);
     } catch { /* sweep is best-effort */ }
   }
 
@@ -122,6 +122,8 @@ export class LadderState extends DurableObject {
 
   async reset() {
     this._state = S.emptyState();
+    const list = await this.ctx.storage.list({ prefix: PIN_PREFIX });
+    for (const [name] of list) await this.ctx.storage.delete(name);
     await this._save();
   }
 }
