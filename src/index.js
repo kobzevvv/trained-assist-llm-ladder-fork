@@ -57,8 +57,6 @@ export default {
     const cron = event?.cron;
     if (cron === '0 */2 * * *') {
       ctx.waitUntil(runFreeModelCollection(env));
-    } else if (cron === '0 */6 * * *') {
-      ctx.waitUntil(runBenchmarkFreeModels(env));
     } else {
       ctx.waitUntil(runMaintenance(env));
     }
@@ -79,22 +77,3 @@ async function runFreeModelCollection(env) {
   }
 }
 
-// Free model benchmark task
-async function runBenchmarkFreeModels(env) {
-  try {
-    const refresher = new FreeModelRefresher({ env });
-    
-    // Check if we have recent benchmark data
-    const benchmarkData = await refresher.getTopModelsForBenchmark();
-    if (!benchmarkData || benchmarkData.length === 0) {
-      console.log('No benchmark data available, skipping benchmark run');
-      return;
-    }
-    
-    console.log('Running scheduled free model benchmark...');
-    await refresher.benchmarkTopModels();
-    
-  } catch (error) {
-    console.error('Scheduled free model benchmark failed:', error);
-  }
-}
