@@ -265,6 +265,9 @@ async function hashPersonalKey(token) {
 }
 
 function isAdmin(auth) {
+  // Personal keys are user-facing only: a personal key must never gain admin access
+  // through a role claim (#341 review).
+  if (auth.tokenKind === 'personal') return false;
   return auth.tokenKind === 'admin' || auth.role === 'admin' || auth.role === 'owner';
 }
 
@@ -895,7 +898,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     const db = env.LADDER_TRACE_DB;
     if (!db) return oaError(503, 'trace database not configured', 'unavailable');
     const q = url.searchParams;
-    const since = Math.min(Number(q.get('since_ms')) || Date.now() - 24 * 3600_000, Date.now());
+    const since = Math.max(0, Math.min(Number(q.get('since_ms')) || Date.now() - 24 * 3600_000, Date.now()));
     const limit = Math.min(Math.max(Number(q.get('limit')) || 20, 1), 200);
     const trace = q.get('trace'), user = q.get('user'), chat = q.get('chat'), session = q.get('session');
     if (!trace && !user && !chat && !session) {
