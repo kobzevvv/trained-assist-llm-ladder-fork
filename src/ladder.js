@@ -17,10 +17,11 @@ export { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBe
 import { classifyError } from './classify.js';
 import { deadRungs } from './dead-rungs.js';
 import { orAccountLimit, orAccountLimitOf, orParkUntil } from './or-limits.js';
-import { estimateTokens, estimateInputTokens, hedgePlan, ttfbFactor, GO_CONTEXT, canFitTokens } from './size-policy.js';
+import { estimateTokens, estimateInputTokens, hedgePlan, ttfbFactor, GO_CONTEXT, canFitTokens, contextOf } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown, abandonQueuedTasks } from './zen-ring.js';
 import { isEmptyAnswer } from './answer-guard.js';
 import { resolveProviderPool } from './provider-credentials.js';
+import { optimizeContext } from './context-optimizer.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -893,7 +894,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   // max_tokens=32768 read as 36 057 — the same number then picked the hedge band, so a trivial
   // call raced three identical copies at three keys. The context gate keeps its own
   // input+output estimate below, which is the only place max_tokens belongs.
-  const estimatedTokensIn = estimateInputTokens(body);
+  let estimatedTokensIn = estimateInputTokens(body);
   let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [], estimated_tokens_in: estimatedTokensIn };
   // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
@@ -1001,6 +1002,47 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   } else {
     rungs = live.length ? live : keyed;
   }
+
+  // ── Pre-Ladder Context Optimization (#331) ───────────────────────────────────────────
+  // If the input exceeds the first free rung's context window, split the history into
+  // chunks, ask that rung to summarize each chunk's relevance, and replace the prompt
+  // with a compact version. This keeps the free tier from dying on oversized contexts
+  // (measured: 21 of 28 `no first token in time` refusals were on payloads ≥ 100 KB).
+  // Fail-open: if the optimizer throws or returns nothing, the original body is used.
+  // Env override `LADDER_CONTEXT_OPTIMIZER_LIMIT` forces a specific limit (for staging/tests).
+  const initialTokens = estimateTokens(body);
+  const firstFreeRung = rungs.find(m => m.startsWith('opencode-go/') && m.endsWith('-free'));
+  if (firstFreeRung) {
+    const rungContext = contextOf(firstFreeRung, orContextCatalog);
+    // Safety margin: keep 15% headroom for response tokens and tokenizer variance.
+    const effectiveLimit = rungContext ? Math.floor(rungContext * 0.85) : Infinity;
+    // Env override: if set, use it instead (e.g., LADDER_CONTEXT_OPTIMIZER_LIMIT=20000 for staging).
+    const forcedLimit = env?.LADDER_CONTEXT_OPTIMIZER_LIMIT
+      ? Number(env.LADDER_CONTEXT_OPTIMIZER_LIMIT)
+      : null;
+    const threshold = forcedLimit && forcedLimit > 0 ? forcedLimit : effectiveLimit;
+
+    if (threshold !== Infinity && initialTokens > threshold) {
+      try {
+        const optimized = await optimizeContext(
+          body, env, fetchImpl, firstFreeRung, attempt, threshold
+        );
+        if (optimized !== body) {
+          body = optimized;
+          reportProgress(onProgress, { type: 'context_optimized', rung: firstFreeRung,
+            tokens_before: initialTokens, tokens_after: estimateTokens(optimized),
+            threshold, rung_context: rungContext });
+        }
+      } catch (e) {
+        // Optimization is a best-effort pre-step: a failure here must not poison the request.
+        console.error('[context-optimizer] failed, proceeding with original:', e && e.message);
+      }
+      // Re-measure after optimization: the race band, ttfb factor and the logged
+      // input size must describe what we actually SEND, not what the client sent.
+      estimatedTokensIn = estimateInputTokens(body);
+    }
+  }
+
   let keyIndex = Math.min(snap.keys.active || 0, Math.max(0, pool.length - 1));
   // Free Go rungs rotate across the pool (owner 2026-10-03: «го фрии модели шли каруселью всё
   // время по одному запросу по очереди перебирая аккаунты»). When the ladder OPENS on a free rung
