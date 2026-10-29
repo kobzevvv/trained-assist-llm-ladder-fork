@@ -405,11 +405,19 @@ export async function collectCatalogs(env, { fetchImpl = fetch, timeoutMs = 10_0
 
 // ── Availability probe ─────────────────────────────────────────────────────────────
 
-// Which rows to probe this run: least-recently-probed first (NULLS FIRST), so a budget smaller
-// than the inventory still rotates coverage instead of always hitting the same head.
-export function planProbes(rows, { limit = 12 } = {}) {
+// Which rows to probe this run. Rungs the ladder ACTUALLY SERVES come first — a model nobody
+// routes to can wait. Within each group, least-recently-probed first (NULLS FIRST), so a budget
+// smaller than the inventory still rotates coverage instead of always hitting the same head.
+//
+// Приоритет по `rungs` — а не по устаревшему `in_ladder` (#341, п. 2). Раньше порядок был чисто
+// по probed_at, а строки шли в порядке провайдеров openrouter → zen → go: бюджет 12 за прогон
+// добирался до opencode-go НИ РАЗУ за всё время (MAX(probed_at) = NULL у всех его строк), и
+// мониторинг показывал `opencode-zen/beam-free: limited` — модель, которой нет ни в одной
+// лестнице, — пока боевой opencode-go/beam-free, голова 29 лестниц, оставался без пробы вообще.
+export function planProbes(rows, { limit = 12, rungs = new Set() } = {}) {
+  const group = (r) => (rungs.has(r.model_id) ? 0 : 1);
   return [...rows]
-    .sort((a, b) => (a.probed_at ?? 0) - (b.probed_at ?? 0))
+    .sort((a, b) => group(a) - group(b) || (a.probed_at ?? 0) - (b.probed_at ?? 0))
     .slice(0, Math.max(0, limit));
 }
 
@@ -645,7 +653,11 @@ export async function collectFreeModels(env, db, {
   const next = new Map(rows.map((r) => [r.model_id, r]));
 
   // Probe only what is in the catalog now — a model that left is not worth a request.
-  const probeTargets = probe ? planProbes(rows, { limit: probeLimit }) : [];
+  // Приоритет пробы — по ТЕКУЩИМ рангам лестницы, а не по in_ladder строк: он обновляется только
+  // апсертом каталога и мог устареть (#341, п. 2). `config` здесь — тот же объект, что и в
+  // ladderRungs ниже, так что список совпадает с тем, что реально обслуживает лестница.
+  const rungsNow = ladderRungs(config);
+  const probeTargets = probe ? planProbes(rows, { limit: probeLimit, rungs: rungsNow }) : [];
   const probes = await probeRows(probeTargets, env, { fetchImpl, timeoutMs: 15_000, concurrency: probeConcurrency });
   for (const row of rows) {
     const p = probes.get(row.model_id);
@@ -702,7 +714,6 @@ export async function collectFreeModels(env, db, {
   // catalog gone (that would be a false "model left" in every diff until it recovers).
   const okProviders = new Set(providers.filter((p) => p.ok).map((p) => p.provider));
   const seen = new Set(rows.map((r) => r.model_id));
-  const rungsNow = ladderRungs(config);
   for (const row of prevRows) {
     if (!seen.has(row.model_id) && okProviders.has(row.provider)) {
       statements.push(goneStatement(row, now, rungsNow.has(row.model_id)));

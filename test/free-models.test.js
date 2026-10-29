@@ -195,6 +195,35 @@ test('planProbes: least-recently-probed first, bounded by the limit', () => {
   assert.equal(planProbes(rows, { limit: 0 }).length, 0);
 });
 
+// #341, п. 2: бюджет пробы мал (12 за прогон), а строки идут в порядке провайдеров
+// openrouter → zen → go. Без приоритета по рангам провайдер opencode-go добирался НИ РАЗУ за всё
+// время (MAX(probed_at) = NULL по всем его строкам), и мониторинг показывал `opencode-zen/beam-free:
+// limited` — модель, которой нет ни в одной лестнице, — пока боевой opencode-go/beam-free,
+// голова 29 лестниц, оставался без пробы вообще.
+test('planProbes: ранги лестницы пробуются в первую очередь, неважно у какого они провайдера', () => {
+  const rows = [
+    // openrouter идут первыми в массиве — как и в реальной выдаче collectCatalogs
+    { model_id: 'openrouter/or-1', probed_at: null },
+    { model_id: 'openrouter/or-2', probed_at: null },
+    { model_id: 'opencode-zen/zen-1', probed_at: null },
+    { model_id: 'opencode-zen/beam-free', probed_at: 1000 },  // пробовали, но он не в лестнице
+    { model_id: 'opencode-go/beam-free', probed_at: null },   // боевой ранг, никогда не пробовали
+    { model_id: 'opencode-go/other', probed_at: null },
+  ];
+  const rungs = new Set(['opencode-go/beam-free']);
+
+  assert.deepEqual(planProbes(rows, { limit: 1, rungs }).map((r) => r.model_id),
+    ['opencode-go/beam-free'],
+    'боевой ранг важнее никогда не пробовавшихся чужих моделей, даже если он «последний» провайдер');
+
+  assert.deepEqual(planProbes(rows, { limit: 2, rungs }).map((r) => r.model_id),
+    ['opencode-go/beam-free', 'openrouter/or-1'],
+    'заполняется группой рангов, и только потом идёт остальная очередь');
+
+  // без переданных рангов поведение прежнее: чисто по probed_at, nulls first, порядок массива сохраняется
+  assert.equal(planProbes(rows, { limit: 1 })[0].model_id, 'openrouter/or-1');
+});
+
 test('probe history stores only actual checks and summarizes uptime separately from free-tier limits', async () => {
   const statements = probeHistoryStatements({
     'opencode-go/a-free': { probe_status: 'ok', probed_at: 1000 },

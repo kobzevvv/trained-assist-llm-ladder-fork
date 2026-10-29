@@ -47,6 +47,10 @@ jobs:
 
       - name: Detect catalog changes
         id: detect
+        env:
+          # Без токена /v1/free-models/collect отвечает 401, скрипт уходит в stderr, stdout
+          # остаётся пустым — и jq падает exit 2 на пустом JSON. Ровно так и уходил прогон.
+          LLM_LADDER_TOKEN: ${{ secrets.LLM_LADDER_TOKEN }}
         run: |
           set -euo pipefail
           # Собираем каталог без проб и бенчмарков, только для детекта изменений
@@ -54,6 +58,10 @@ jobs:
             --probe false \
             --dry-run true \
             --json > catalog-diff.json
+
+          # Пустой или невалидный JSON — это сбой сбора, а не «изменений нет»: без этой проверки
+          # молча уходит дальше и бенчмарк просто не запускается.
+          jq -e 'type == "object" and (.diff | type == "object")' catalog-diff.json > /dev/null
 
           # Проверяем изменения
           APPEARED=$(jq '.diff.appeared | length' catalog-diff.json)

@@ -453,6 +453,37 @@ const LADDER_MANAGED_FIELDS = new Set(['model', 'stream', 'max_tokens', 'stream_
 // не пробовали, и тогда клиент молча лишится работающего поля. Имена полей — не секреты, поэтому
 // они идут в лог, а значения не логируются вовсе. Увидели событие go-field-whitelist с именем —
 // добавили его в список и переверили.
+
+// STRICT-РЕЖИМ. Замерено против живого шлюза opencode-go пин-вызовами 2026-10-29:
+//   без strict                                  → 200
+//   strict:true БЕЗ additionalProperties:false  → 400
+//   strict:true + AP:false, все свойства в req  → 200
+//   strict:true + AP:false, но схема неполная   → 400
+// То есть шлюз применяет правила strict-режима OpenAI (additionalProperties:false на каждом объекте
+// + каждое свойство в required), и отказ — это НЕ его причуда, а невалидный запрос клиента.
+//
+// Что делаем: снимаем ТОЛЬКО флаг strict и повторяем ту же ступень один раз. Схему не трогаем.
+// Молча дописывать в схему клиента additionalProperties:false и|required было бы изменением его
+// контракта, а флаг снять безопасно: без него та же схема работает как обычная, и клиент получает
+// ответ вместо мёртвого хопа. Повтор срабатывает только тогда, когда запрос всё равно падал, поэтому
+// валидная strict-схема не замечает ничего.
+export function hasStrictTools(body) {
+  const tools = body?.tools;
+  return Array.isArray(tools) && tools.some((t) => t?.function?.strict === true);
+}
+
+function withoutStrictFlag(body) {
+  if (!hasStrictTools(body)) return body;
+  return {
+    ...body,
+    tools: body.tools.map((t) => {
+      if (t?.function?.strict !== true) return t;
+      const fn = { ...t.function };
+      delete fn.strict;
+      return { ...t, function: fn };
+    }),
+  };
+}
 function pickGoFields(body) {
   const out = {};
   const dropped = [];
@@ -464,7 +495,7 @@ function pickGoFields(body) {
   return out;
 }
 
-export function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null, appSlug = null, appTitle = null, pool = null, orIndex = null } = {}) {
+export function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, stripStrict = false, conversation = null, appSlug = null, appTitle = null, pool = null, orIndex = null } = {}) {
   const isGo = model.startsWith('opencode-go/');
   const isZen = model.startsWith('opencode-zen/');
   // The pool is resolved ONCE per call (env secrets + admin-managed D1 credentials) and threaded
@@ -488,13 +519,15 @@ export function upstreamRequest(env, model, body, keyIndex, { stream = false, st
     headers['X-OpenRouter-Title'] = sanitizeAppTitle(appTitle);
     headers['X-OpenRouter-App-Visibility'] = 'hidden';
   }
+  // Повтор после HTTP 400 от strict-схемы (#341): тот же запрос, но без флага strict.
+  const source = stripStrict ? withoutStrictFlag(body) : body;
   const upstream = {
     // Шлюз opencode-go принимает только известные ему поля и отвечает HTTP 400 на остальное,
     // а раньше сюда forwardingался клиентский body целиком (#341, п. 4). Список собран замером
     // синтетическими пин-вызовами: OpenRouter на том же теле отвечает 200, то есть строгость —
     // свойство именно этого гейта. Из-за лишнего поля ~54 % вызовов beam-free упирались в 400
     // на ПЕРВОЙ ступени и жгли хоп (1–12 с) перед уходом на dots-3.
-    ...(isGo ? pickGoFields(body) : body),
+    ...(isGo ? pickGoFields(source) : source),
     model: model.replace(/^opencode-go\/|^opencode-zen\/|^openrouter\//, ''),
     stream,
     max_tokens: Math.max(Number(body.max_tokens) || 0, minTokensFor(model)),
@@ -555,13 +588,19 @@ export function ringGuardRetry(data, body) {
 // Non-streaming attempt. A tool-call answer with no text is a valid answer.
 async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null, appSlug = null, appTitle = null, pool = null, orIndex = null }) {
   let stripRf = false;
+  let stripStrict = false;
   for (;;) {
-    const req = upstreamRequest(env, model, body, keyIndex, { stripRf, conversation, appSlug, appTitle, pool, orIndex });
+    const req = upstreamRequest(env, model, body, keyIndex, { stripRf, stripStrict, conversation, appSlug, appTitle, pool, orIndex });
     if (!req) return { ok: false, skip: true, error: 'no key' };
     const { res, error } = await post(fetchImpl, req, AbortSignal.timeout(timeoutMs));
     if (error) return { ok: false, error };
     if (!res.ok) {
       const errText = String(await res.text().catch(() => ''));
+      // strict-схема, не выполняющая правила strict-режима, отвергается шлюзом opencode-go (#341):
+      // повторяем ту же ступень один раз без флага strict, схему не трогая. Проверка идёт ДО
+      // response_format, потому что причина отказа в этом случае детерминирована и не зависит от
+      // текста тела (замер 2026-10-29: 400 воспроизводится 4 из 4 прогонов).
+      if (res.status === 400 && !stripStrict && model.startsWith('opencode-go/') && hasStrictTools(body)) { stripStrict = true; continue; }
       // Provider rejects response_format → retry the SAME rung once without it (prompt-only JSON).
       if (res.status === 400 && !stripRf && body.response_format && RF_400_RE.test(errText)) { stripRf = true; continue; }
       // The account-level OpenRouter limit is read from the FULL body (#297): `limit_source` and the
