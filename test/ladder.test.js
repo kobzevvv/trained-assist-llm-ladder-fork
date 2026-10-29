@@ -1169,6 +1169,54 @@ test('upstreamRequest: opencode-go получает только известн�
   assert.equal(or.body.model, 'nvidia/nemotron-3-super-120b-a12b:free', 'и префикс у OpenRouter срезается как раньше');
 });
 
+// #341: strict-схема, не выполняющая правила strict-режима (additionalProperties:false на каждом
+// объекте + каждое свойство в required), отвергается шлюзом opencode-go HTTP 400. Замерено
+// 2026-10-29: 400 воспроизводится 4 из 4 прогонов на strict:true без AP:false, и та же схема
+// с флагом снятым проходит. Лестница повторяет ТУ ЖЕ ступень один раз — схему не трогая.
+test('HTTP 400 от strict-схемы → повтор той же ступени без флага strict (#341)', async () => {
+  const cfg = { ...GOCFG, ladders: { ...GOCFG.ladders, service: { build: ['opencode-go/beam-free'] } } };
+  const parameters = { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] };
+  const strictTool = [{ type: 'function', function: { name: 'search', description: 's', strict: true, parameters } }];
+
+  const calls = [];
+  const beh = {
+    // шлюз требует additionalProperties:false при strict — этой схемы нет, поэтому отказ
+    [short('opencode-go/beam-free')]: ({ body }) =>
+      (body.tools?.[0]?.function?.strict === true ? { status: 400, error: 'Invalid schema for strict mode' } : { status: 200, content: 'ok' }),
+  };
+  const store = memoryStore(2);
+  const r = await run({ model: 'service', tools: strictTool, messages: [{ role: 'user', content: 'hi' }] },
+    { env, config: cfg, store, fetchImpl: fakeFetch(beh, calls) });
+
+  assert.equal(r.ok, true, `ступень обязана ответить после повтора: ${JSON.stringify(r.attempts)}`);
+  assert.equal(calls.length, 2, 'ровно два запроса: с strict → 400, без → 200');
+  assert.equal(calls[0].body.tools[0].function.strict, true, 'первый ушёл с флагом strict');
+  assert.equal(calls[1].body.tools[0].function.strict, undefined, 'повтор — уже без него');
+  assert.deepEqual(calls[1].body.tools[0].function.parameters, parameters,
+    'СХЕМА не изменена — снят только флаг, контракт клиента не переписан');
+  assert.equal(store.state.health['opencode-go/beam-free'], undefined,
+    'повтор не ядовит здоровью ступени: успех снимает любую записанную попытку');
+
+  // повтор ОДИН раз НА КЛЮЧ: если шлюз отвергает и без флага, ступень честно падает, а не крутится.
+  // После повтора включается обычный обход ключей (#311), поэтому считаем по каждому ключу.
+  const always400 = { [short('opencode-go/beam-free')]: () => ({ status: 400, error: 'nope' }) };
+  const calls2 = [];
+  const r2 = await run({ model: 'service', tools: strictTool, messages: [{ role: 'user', content: 'hi' }] },
+    { env, config: cfg, store: memoryStore(2), fetchImpl: fakeFetch(always400, calls2) });
+  assert.equal(r2.ok, false, 'и не зависает, если помогло не снятие флага');
+
+  const perKey = {};
+  for (const c of calls2) {
+    const slot = (perKey[c.auth] ||= { total: 0, strict: 0 });
+    slot.total++;
+    if (c.body.tools?.[0]?.function?.strict === true) slot.strict++;
+  }
+  for (const [auth, v] of Object.entries(perKey)) {
+    assert.equal(v.strict, 1, `на ключ ${auth} ровно ОДИН запрос с флагом strict, а не по кругу: ${v.strict}`);
+    assert.ok(v.total <= 2, `на ключ ${auth} не больше двух запросов (strict + повтор): ${v.total}`);
+  }
+});
+
 test('app attribution defaults: no slug → llm-ladder, no title → Trained Assist (openrouter only)', () => {
   const or = upstreamRequest(env, 'openrouter/x/y', msg, 0, {});
   assert.equal(or.headers['HTTP-Referer'], `${APP_REFERER_BASE}/${DEFAULT_APP_SLUG}`);
