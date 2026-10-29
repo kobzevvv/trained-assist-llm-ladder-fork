@@ -1,7 +1,7 @@
 import { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex, nextUsableOpenrouterIndex } from './go-routing.js';
 export { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex, nextUsableOpenrouterIndex, resetFreeGoKeyCursor, resetOpenrouterKeyCursor } from './go-routing.js';
-// last. Non-streaming, for small service calls (buttons, formatting, classifiers, summaries)
-// where reliability beats everything else.
+// Streaming-aware ladder for service calls (buttons, formatting, classifiers, summaries,
+// chat) where reliability beats everything else. Supports both streaming and non-streaming.
 //
 //   * model health — a flaky / limited rung is skipped for everyone (shared state in `store`);
 //   * Go key pool — a key-level fault rotates to the spare key and the rung is retried; a rung
@@ -42,10 +42,9 @@ export const MIN_TOKENS = 1500;
 // either and is gone from the ladder (dead 404, removed 2026-09-30). See the PR for the full per-rung table.
 //
 // Added after #39 reordered deepseek: opencode-go/space-bunny-free measured reasoning_tokens=32
-// (+ reasoning_content 100ch) through the live worker. The four opencode-zen/* rungs (now the tail
-// of the free ladder, #43) were measured 30.09 through the live worker once the relay was up —
-// mimo-v2.6-flash-free 17, mimo-v2.5-free 15, nemotron-3.5-lightning-free 255, big-pickle 43 —
-// and are added (#42).
+// (+ reasoning_content 100ch) through the live worker. The opencode-zen/* rungs listed below were
+// measured through the relay when it was up; they are retained for history but are retired from
+// ladders (see commit 7bbbd21).
 export const REASONING_MIN_TOKENS = 3000;
 export const REASONING_MODELS = [
   'opencode-go/space-bunny-free',
@@ -96,7 +95,7 @@ export async function readOrContextCatalog(env) {
   } catch { return {}; }
 }
 
-export const DEFAULT_LADDER = 'service'; // legacy alias 'deepseek' resolves here (issue #49)
+export const DEFAULT_LADDER = 'service'; // alias 'deepseek' now resolves to 'build' (config/aliases)
 const DEFAULT_ROLE = 'build';
 // OpenRouter app attribution (#33): HTTP-Referer URL *is* the application identity in the
 // OpenRouter dashboard ("Application" cut), Title is its display name, hidden keeps our internal
@@ -311,7 +310,7 @@ export async function fetchOrUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } 
   return { key: raw[0]?.key ?? null, credits: raw[0]?.credits ?? null, accounts, pool: totals };
 }
 
-// "service" (legacy alias "deepseek"), "service:review" or an alias ("free-ladder") → rungs, null if unknown.
+// "service" or "service:review" → rungs; alias "deepseek" → "build" (config/aliases). null if unknown.
 // Aliases resolve on READ only (never written back), so stored state keeps working after a rename.
 export function rungsFor(config, name) {
   const [ladderName, role] = String(name || DEFAULT_LADDER).split(':');
@@ -434,9 +433,9 @@ const RF_400_RE = /structured[-_ ]outputs?|response[_ ]?format|json_object|strea
 // анонимного сканера (его payload минимален) и 0 % на лестницах free/plan/general. Первый ранг
 // упирался в 400 и жёг хоп 1–12 с перед переходом на dots-3.
 //
-// Известный остаток, НЕ закрытый здесь: tools со strict:true + $defs в схеме тоже даёт 400.
-// Санитайзация схемы меняет семантику structured outputs у клиента, поэтому решение принимается
-// отдельно и описано в #341.
+// tools со strict:true дают 400 при невалидной strict-схеме (без additionalProperties:false
+// или required); это снимается флагом strict и повтором, а не правкой схемы клиента (#341, п. 4).
+// $defs сами по себе не причина отказа (проверено изоляцией факторов).
 const GO_ALLOWED_FIELDS = new Set([
   'messages', 'tools', 'tool_choice', 'response_format',
   'temperature', 'top_p', 'presence_penalty', 'frequency_penalty',
@@ -644,7 +643,7 @@ function isOutputEvent(line) {
 // Streaming attempt: resolves once the first output event arrived (→ committed stream that
 // replays the buffered bytes and pipes the rest), or fails before it (→ caller tries next rung).
 async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, conversation = null, appSlug = null, appTitle = null, pool = null, orIndex = null }) {
-  const req = upstreamRequest(env, model, body, keyIndex, { stream: true, stripRf: !!body._stripRf, conversation, appSlug, appTitle, pool, orIndex });
+  const req = upstreamRequest(env, model, body, keyIndex, { stream: true, stripRf: !!body._stripRf, stripStrict: !!body._stripStrict, conversation, appSlug, appTitle, pool, orIndex });
   if (!req) return { ok: false, skip: true, error: 'no key' };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error('no first token in time')), ttfbMs);
@@ -653,6 +652,9 @@ async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, co
   if (!res.ok) {
     clearTimeout(timer);
     const errText = String(await res.text().catch(() => ''));
+    if (res.status === 400 && !body._stripStrict && model.startsWith('opencode-go/') && hasStrictTools(body)) {
+      return attemptStream(env, model, { ...body, _stripStrict: true }, keyIndex, { ttfbMs, fetchImpl, conversation, appSlug, appTitle, pool, orIndex });
+    }
     if (res.status === 400 && !body._stripRf && body.response_format && RF_400_RE.test(errText)) {
       return attemptStream(env, model, { ...body, _stripRf: true }, keyIndex, { ttfbMs, fetchImpl, conversation, appSlug, appTitle, pool, orIndex });
     }
@@ -867,7 +869,7 @@ export function shouldRetryRingCall(result) {
 
 /**
  * @param {object} body   OpenAI chat.completions body; `model` = ladder name ("service",
- *                        legacy alias "deepseek", "service:review", alias "free-ladder"). stream:true → SSE (rung chosen
+ *                        "service:review", alias "deepseek"→"build"). stream:true → SSE (rung chosen
  *                        before the first token); tools / tool_choice passed through as is.
  * @param {object} ctx    { env, config, store, fetchImpl, timeoutMs=20000, totalTimeoutMs, now,
  *                          pinRung, conversation, appSlug, appTitle }
@@ -953,7 +955,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   // pre-filter below can refuse a rung whose window is smaller than the request BEFORE the
   // attempt, instead of burning a key on a 400 the provider wraps in silence.
   const orContextCatalog = await readOrContextCatalog(env);
-  const snap = await store.snapshot(undefined, conversation);
+  const snap = await store.snapshot(pool.length, conversation);
   const now = Date.now();
   // OpenRouter ACCOUNT parks (issue #297): the free allowance is counted per account, so an account
   // that ran out is remembered until its own reset and stepped over — the OTHER accounts of the pool
@@ -1093,7 +1095,11 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     let fastProbeBudget = isGo && !pinRung ? Math.max(0, pool.length - 1) : 0;
     // #69: a full-key park (weekly limit on every key) skips only the PAID Go rungs — a free
      // Go rung keeps serving, it does not consume the allowance and must not die in the incident.
-     if (isGo && goParked && !model.endsWith('-free')) continue;
+     if (isGo && goParked && !model.endsWith('-free')) {
+       attempts.push({ model, outcome: 'skipped', error: 'go pool exhausted (paid rungs parked)' });
+       reportProgress(onProgress, { type: 'rung_skipped', rung: model, reason: 'go_pool_exhausted' });
+       continue;
+     }
     const left = deadline - Date.now();
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
     if (previousFailedRung) {
@@ -1180,7 +1186,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     let r = race
       ? await raceGoKeys(model, key, plan.count, pool.length, tried, attemptKey)
       : await attemptKey(key);
-    if (r.skip) continue;
+    if (r.skip) { attempts.push({ model, outcome: "skipped", error: r.error || "no key" }); continue; }
     // #45 (owner «если ошибка то ретрай и далее потом по лесенке»): a guard-failed answer ALREADY
     // arrived — retrying the same rung costs a fraction of one ladder hop, while today's straight
     // descent pays double: a hop to a possibly pricier rung PLUS a health-skip that punishes every
@@ -1331,7 +1337,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
     previousFailedRung = model;
-    if (!goParked) {
+    if (!goParked || isFreeGo) {
       const cls = errorClass(r.error)?.class || 'transient';
       // ⚫-1 resolution (step 3): a context-class overflow while STUCK on the pinned rung returns
       // the error as-is (the same request would overflow every lower rung — a retry loop cannot
