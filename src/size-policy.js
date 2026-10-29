@@ -38,6 +38,23 @@ export function estimateTokens(body) {
   } catch { return 0; }
 }
 
+// ВХОД, без выходного бюджета клиента (issue #341). То же калиброванное bytes/4×1.1, но без
+// max_tokens: «сколько мы отправляем» — это то, что кладётся в трассу (estimated_tokens_in
+// существует, чтобы отвечать «какими были упавшие запросы») и то, по чему считается полоса
+// гонки. max_tokens — это бюджет ОТВЕТА, а не вход: на нём построить полосу нельзя.
+//
+// Инцидент 2026-10-28: промпт на 11 токенов с max_tokens=32768 оценивался в 36 057 и попадал в
+// полосу 32–128K → hedgePlan(count:3) → ОДИН И ТОТ ЖЕ запрос уходил на три ключа Go разом. Это
+// лишний расход бесплатной ёмкости и одновременный удар по всем ключам при лимите (см. #341, п. 1).
+export function estimateInputTokens(body) {
+  const m = body?.messages;
+  if (!Array.isArray(m) || !m.length) return 0;
+  try {
+    const bytes = new TextEncoder().encode(JSON.stringify(m)).length;
+    return Math.ceil(bytes / 4 * 1.1);
+  } catch { return 0; }
+}
+
 // ── Context windows ──────────────────────────────────────────────────────────────────────────
 // One place decides whether a rung may receive a request. Three sources, in priority:
 //   1. opencode-go — measured ceiling (GO_CONTEXT in size-policy.js, all 900K). The ladder

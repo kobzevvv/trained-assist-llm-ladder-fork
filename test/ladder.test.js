@@ -547,12 +547,45 @@ test('every key limited → paid Go rungs parked, free Go rungs keep serving (#6
   const calls2 = [];
   const r2 = await run(msg, { env, config: PAID_FIRST, store, fetchImpl: fakeFetch({}, calls2) });
   assert.equal(r2.model, 'opencode-go/beam-free');
-  // окно истекло → платный Go снова в голове, без ручных шагов
+  // окно истекло → платный Go снова в голове, без ручных шагов.
+  // Чистим ОБЕ карты: с #341 лимит платного ранга живёт в `paid`, а не в `exhausted`.
   for (const m of Object.keys(store.state.health)) store.state.health[m].skipUntil = Date.now() - 1;
-  for (const k of Object.keys(store.state.keys.exhausted)) store.state.keys.exhausted[k] = Date.now() - 1;
+  for (const map of [store.state.keys.exhausted, store.state.keys.paid || {}]) {
+    for (const k of Object.keys(map)) map[k] = Date.now() - 1;
+  }
   const calls3 = [];
   const r3 = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch({}, calls3) });
   assert.equal(r3.model, GOLADDER[0]);
+});
+
+// #341: пауза ключа, поставленная ПЛАТНЫМ рангом, не должна отнимать у бесплатного обход пула.
+// Инцидент 2026-10-28 23:05–23:45Z: 429 давали ТОЛЬКО mimo-v2.6-flash (75 + 2 key-rotated) и
+// deepseek-v4-pro (36), у beam-free — ни одного 429, и при этом 61 его вызов отвечал. Общий
+// exhausted после 429 от платного закрывал spare-обход, и бесплатному оставалась ровно одна
+// попытка на уже припаркованном ключе: pool.findIndex(!exhaustedAtStart) → -1 → break.
+test('платный 429 сажает ключ только для платных рангов — бесплатный обходит весь пул (#341)', async () => {
+  const cfg = { ...GOCFG, ladders: { ...GOCFG.ladders, service: { build: ['opencode-go/mimo-v2.6-flash', 'opencode-go/beam-free'] } } };
+  let beamCalls = 0;
+  const beh = {
+    // платный ранг упирается в лимит на КАЖДОМ ключе — ровно то, что было в инциденте
+    [short('opencode-go/mimo-v2.6-flash')]: () => ({ status: 429, error: 'usage limit' }),
+    // бесплатный отказывает на СВОЕЙ первой попытке, но здоров на запасном ключе.
+    // Счётчик, а не ключ: какой именно ключ достаётся стартовым, зависит от карусели (#81).
+    [short('opencode-go/beam-free')]: () => (++beamCalls === 1 ? { status: 403, error: 'forbidden' } : { status: 200, content: 'ok' }),
+  };
+  const store = memoryStore(2);
+  const calls = [];
+  const r = await run(msg, { env, config: cfg, store, fetchImpl: fakeFetch(beh, calls) });
+
+  assert.equal(r.ok, true,
+    `бесплатный ранг обязан дойти до здорового ключа, попыток: ${JSON.stringify(r.attempts)}`);
+  assert.equal(r.model, 'opencode-go/beam-free', 'и отвечает та же ступень, не фоллбэк');
+  assert.equal(Object.keys(store.state.keys.paid || {}).length, 2,
+    'оба 429 от платного ранга уходят в ПЛАТНУЮ карту, а не в общую');
+  assert.equal(store.state.health['opencode-go/mimo-v2.6-flash']?.class, 'quota',
+    'сам платный ранг по-прежнему припаркован — мы не ослабляем его защиту');
+  assert.equal(store.state.health['opencode-go/beam-free'], undefined,
+    'бесплатный ранг здоровью не испорчен: его 403 — свойство запроса, а не ступени');
 });
 
 test('non-key failure on a Go rung probes the spare key once, but never burns shared state', async () => {
@@ -1064,10 +1097,11 @@ test('ladder: concurrent weekly-limit on key 0 keeps Go serving on key 1', async
 
 test('state: resetKeys clears Go key parks and Go rung skips, keeps OpenRouter health', () => {
   const st = emptyState();
-  st.keys = { active: 1, exhausted: { 0: 9e15, 1: 9e15 } };
+  st.keys = { active: 1, exhausted: { 0: 9e15, 1: 9e15 }, paid: { 0: 9e15 } };
   st.health = { 'opencode-go/mimo': { skipUntil: 9e15 }, 'openrouter/x': { skipUntil: 9e15 } };
   resetKeys(st);
-  assert.deepEqual(st.keys, { active: 0, exhausted: {} });
+  assert.deepEqual(st.keys, { active: 0, exhausted: {}, paid: {} },
+    'общий парк и ПЛАТНЫЙ парк сбрасываются вместе — рычаг оператора обязан освобождать оба');
   assert.deepEqual(Object.keys(st.health), ['openrouter/x']);
 });
 
@@ -1082,6 +1116,57 @@ test('upstreamRequest: HTTP-Referer / X-OpenRouter-Title / Visibility only on op
   for (const h of ['HTTP-Referer', 'X-OpenRouter-Title', 'X-OpenRouter-App-Visibility']) {
     assert.equal(go.headers[h], undefined, `${h} must not be sent to Go`);
   }
+});
+
+// #341, п. 4: шлюз opencode-go отвечает HTTP 400 на любое неизвестное ему поле, а раньше сюда шёл
+// клиентский body целиком (`upstream = { ...body }`). Список собран замером против живого шлюза;
+// на OpenRouter ВСЕ эти поля проходят, поэтому фильтр применяется только к Go.
+test('upstreamRequest: opencode-go получает только известные поля, OpenRouter — body целиком (#341)', () => {
+  const body = {
+    model: 'service',
+    messages: [{ role: 'user', content: 'hi' }],
+    // замерено: каждый из этих даёт 400 от гейта opencode-go
+    top_k: 40, min_p: 0.05, repetition_penalty: 1.1, n: 2, logit_bias: { 1: -1 },
+    custom_id: 'c', store: true, parallel_tool_calls: false, prompt_cache: true,
+    // а эти проходят и должны доехать
+    temperature: 0.7, top_p: 0.9, stop: ['\n'], seed: 42,
+    user: 'trained-assist', metadata: { a: 'b' }, service_tier: 'auto',
+  };
+
+  const logged = [];
+  const log = console.log;
+  console.log = (line) => logged.push(String(line));
+  let go;
+  try {
+    go = upstreamRequest(env, 'opencode-go/beam-free', body, 0, {});
+  } finally { console.log = log; }
+
+  for (const dropped of ['top_k', 'min_p', 'repetition_penalty', 'n', 'logit_bias',
+    'custom_id', 'store', 'parallel_tool_calls', 'prompt_cache']) {
+    assert.equal(dropped in go.body, false, `opencode-go не должен получить ${dropped}`);
+  }
+  // Отсечение обязано быть видимым: иначе клиент молча лишится работающего поля, а шлюз может
+  // принимать и то, чего мы не пробовали. В лог уходят ТОЛЬКО ИМЕНА, значения не логируются.
+  const whitelistLog = logged.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .find((e) => e && e.route === 'go-field-whitelist');
+  assert.ok(whitelistLog, 'отброшенные поля фиксируются в логе');
+  assert.deepEqual(whitelistLog.dropped.sort(),
+    ['custom_id', 'logit_bias', 'min_p', 'n', 'parallel_tool_calls', 'prompt_cache', 'repetition_penalty', 'store', 'top_k'].sort(),
+    'и перечислены по именам');
+  assert.equal(logged.join('').includes('"hi"'), false, 'значения полей в лог не попадают');
+  for (const kept of ['messages', 'temperature', 'top_p', 'stop', 'seed', 'user', 'metadata', 'service_tier']) {
+    assert.ok(kept in go.body, `opencode-go обязан получить ${kept}`);
+  }
+  // model / stream / max_tokens выставляет сама лестница, а не клиент
+  assert.equal(go.body.model, 'beam-free');
+  assert.equal(go.body.stream, false);
+  assert.ok(go.body.max_tokens > 0, 'потолок ответа ставит лестница');
+
+  const or = upstreamRequest(env, 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', body, 0, {});
+  for (const field of ['top_k', 'n', 'store', 'min_p']) {
+    assert.ok(field in or.body, `OpenRouter получает body целиком — ${field} на месте`);
+  }
+  assert.equal(or.body.model, 'nvidia/nemotron-3-super-120b-a12b:free', 'и префикс у OpenRouter срезается как раньше');
 });
 
 test('app attribution defaults: no slug → llm-ladder, no title → Trained Assist (openrouter only)', () => {

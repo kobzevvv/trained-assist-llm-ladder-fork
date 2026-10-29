@@ -97,8 +97,8 @@ export class LadderState extends DurableObject {
     } catch { /* sweep is best-effort */ }
   }
 
-  async rotateKey(poolSize, ttlMs, failedIndex) {
-    const r = S.rotateKey(await this._load(), poolSize, ttlMs, Date.now(), failedIndex);
+  async rotateKey(poolSize, ttlMs, failedIndex, scope) {
+    const r = S.rotateKey(await this._load(), poolSize, ttlMs, Date.now(), failedIndex, scope);
     await this._save();
     return r;
   }

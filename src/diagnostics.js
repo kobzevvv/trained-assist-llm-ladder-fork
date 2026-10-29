@@ -28,11 +28,21 @@ export function safeAttemptDiagnostics(attempts = []) {
     const model = String(attempt.model || 'unknown');
     const raw = String(attempt.error || '');
     const outcome = String(attempt.outcome || 'error');
-    if (!raw) return { model, outcome };
+    // Индекс ключа из СВОЕГО пула (#341). Это наше структурное поле: маленькое целое, не тело
+    // провайдера и не промпт, поэтому контракт #256 его не касается. key-probe и key-rotated
+    // несли его с самого начала, а терялся он на последнем шагу — из-за чего в инциденте
+    // 2026-10-28 приходилось восстанавливать, какие именно ключи садились, по модели-источнику
+    // 429, вместо того чтобы просто посмотреть на индексы.
+    // Проходит только НЕОТРИЦАТЕЛЬНОЕ ЦЕЛОЕ: индекс пула — это 0..poolSize-1. Любое другое
+    // значение (строка, дробь, отрицательное, объект) отбрасывается целиком, так что даже cred,
+    // случайно положенный в это поле, в D1 не попадёт.
+    const key = Number.isInteger(attempt.key) && attempt.key >= 0 ? { key: attempt.key } : {};
+
+    if (!raw) return { model, outcome, ...key };
 
     // Своё сообщение доезжает дословно: и на записи, и при повторном чтении из D1.
     const own = LADDER_OWNED.find((o) => o.re.test(raw));
-    if (own) return { model, outcome, source: 'ladder', reason_code: own.reason, error: raw };
+    if (own) return { model, outcome, ...key, source: 'ladder', reason_code: own.reason, error: raw };
 
     const source = model.startsWith('zen-rings/') ? 'zen_pool' : 'provider';
     // Префикс `provider returned` распознаётся тоже: /v1/calls и /v1/analytics передают сюда
@@ -41,25 +51,25 @@ export function safeAttemptDiagnostics(attempts = []) {
 
     if (http) {
       return {
-        model, outcome, source,
+        model, outcome, ...key, source,
         reason_code: 'provider_http_error',
         http_status: Number(http[1]),
         error: `provider returned HTTP ${http[1]}`,
       };
     }
     if (/timeout|timed out|aborterror|no first token in time|before first token|provider timed out/i.test(raw)) {
-      return { model, outcome, source, reason_code: 'provider_timeout', error: 'provider timed out' };
+      return { model, outcome, ...key, source, reason_code: 'provider_timeout', error: 'provider timed out' };
     }
     if (/warming up|cold ring|pool_backlog|no warm worker|capacity unavailable/i.test(raw)) {
-      return { model, outcome, source: 'zen_pool', reason_code: 'provider_capacity', error: 'Zen worker capacity unavailable' };
+      return { model, outcome, ...key, source: 'zen_pool', reason_code: 'provider_capacity', error: 'Zen worker capacity unavailable' };
     }
     if (/empty answer|empty response|invalid json|no usable answer/i.test(raw)) {
-      return { model, outcome, source, reason_code: 'provider_empty_response', error: 'provider returned no usable answer' };
+      return { model, outcome, ...key, source, reason_code: 'provider_empty_response', error: 'provider returned no usable answer' };
     }
     if (/fetch failed|network|socket|econn|tls|upstream request failed|connection failed/i.test(raw)) {
-      return { model, outcome, source, reason_code: 'provider_transport_error', error: 'provider connection failed' };
+      return { model, outcome, ...key, source, reason_code: 'provider_transport_error', error: 'provider connection failed' };
     }
 
-    return { model, outcome, source, reason_code: 'provider_error', error: 'provider request failed' };
+    return { model, outcome, ...key, source, reason_code: 'provider_error', error: 'provider request failed' };
   });
 }

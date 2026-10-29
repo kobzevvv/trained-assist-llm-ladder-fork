@@ -1,6 +1,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateTokens, hedgePlan, ttfbFactor, contextOf, GO_CONTEXT, canFitTokens } from '../src/size-policy.js';
+import { estimateTokens, estimateInputTokens, hedgePlan, ttfbFactor, contextOf, GO_CONTEXT, canFitTokens } from '../src/size-policy.js';
+
+// #341: «сколько мы ОТПРАВЛЯЕМ» и «сколько должно ВЛЕЗТЬ в окно модели» — это разные числа.
+// Трасса и полосы гонки читают первое, гейт по контексту — второе. Смешение обеих цифр и
+// посадило гонку на крошечном промпте: 11 токенов + max_tokens=32768 читались как 36 057 и
+// попадали в полосу 32–128K, где hedgePlan гоняет запрос на трёх ключах Go сразу.
+test('estimateInputTokens: выходной бюджет клиента не входит во вход (#341)', () => {
+  const base = { messages: [{ role: 'user', content: 'Reply ready' }] };
+  const fat = { messages: [{ role: 'user', content: 'x'.repeat(400_000) }] };
+
+  assert.equal(estimateInputTokens(undefined), 0, 'нет сообщений → 0, и не бросает');
+  assert.equal(estimateInputTokens({ messages: [] }), 0, 'пустой массив → 0');
+
+  // Главное: max_tokens НЕ меняет оценку входа
+  assert.equal(estimateInputTokens({ ...base, max_tokens: 32_768 }), estimateInputTokens(base),
+    'крошечный промпт обязан оставаться крошечным при каком угодно max_tokens');
+  assert.equal(estimateInputTokens({ ...fat, max_tokens: 32_768 }), estimateInputTokens(fat),
+    'и для жирного промпта тоже');
+
+  // а контекстная оценка по-прежнему его учитывает — это то, что должно влезть в окно
+  assert.ok(estimateTokens({ ...base, max_tokens: 32_768 }) > estimateTokens(base) + 30_000,
+    'гейт по контексту обязан видеть вход + бюджет ответа');
+
+  // полосы читаются от ВХОДА: крошечный промпт не может попасть в гоночную полосу
+  assert.equal(hedgePlan(estimateInputTokens({ ...base, max_tokens: 32_768 })).count, 1,
+    '11 токенов с любым max_tokens — одна попытка, без гонки');
+  assert.ok(hedgePlan(estimateInputTokens(fat)).count > 1, 'а жирный вход по-прежнему гоняется');
+});
 
 test('estimateTokens: a token count without talking to a provider', () => {
   assert.equal(estimateTokens(undefined), 0, 'no messages → 0, and it must not throw');
