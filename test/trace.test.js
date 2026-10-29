@@ -146,6 +146,53 @@ test('logCall normalizes OpenAI, Anthropic and DeepSeek cache usage dialects', a
   }
 });
 
+// #341: estimated_tokens_in — НАША оценка входа, и она есть при ЛЮБОМ исходе. У отказа у провайдера
+// нет usage, и раньше это роняло оценку вместе с ним: в D1 за сутки не было НИ ОДНОГО отказа с
+// est (0 из 464 при 1188 из 1188 у успехов), хотя колонку добавляли ровно чтобы отвечать
+// «какими были упавшие запросы» (#333). Причина — ранний выход по отсутствию usage.
+test('logCall: отказ без usage всё равно несёт estimated_tokens_in (#341)', async () => {
+  const d1 = fakeD1();
+  await logCall({ LADDER_TRACE_DB: d1 }, { traceId: 't-fail' }, 'service', {
+    ok: false, model: null, estimated_tokens_in: 1111,
+    attempts: [{ model: 'opencode-go/beam-free', outcome: 'error', error: 'provider returned HTTP 500' }],
+  }, Date.now());
+
+  const r = row(d1._rows[0]);
+  assert.equal(r.ok, 0);
+  assert.equal(r.tokens_in, null, 'счётчики провайдера остаются null — usage у отказа нет');
+  assert.equal(r.tokens_out, null);
+  assert.equal(r.estimated_tokens_in, 1111, 'а своя оценка входа доезжает');
+});
+
+test('logCall: нечисловая оценка не выдумывается — становится null (#341)', async () => {
+  // Контракт guard'а: «конечное число → пишем, всё остальное → null». Целостность не требуется —
+  // estimateInputTokens и так возвращает целое, а ломать запись из-за дробного значения незачем.
+  for (const bogus of [undefined, null, NaN, 'x', Infinity, -Infinity, {}, [], true]) {
+    const d1 = fakeD1();
+    await logCall({ LADDER_TRACE_DB: d1 }, { traceId: 't-bad' }, 'service',
+      { ok: false, estimated_tokens_in: bogus, attempts: [] }, Date.now());
+    assert.equal(row(d1._rows[0]).estimated_tokens_in, null, `не конечное число → null: ${String(bogus)}`);
+  }
+});
+
+// Сквозной через реальный хендлер: провайдер не настроен → вызов честно падает, но строка в D1
+// всё равно объясняет, каким был запрос. Без провайдерного ключа сеть не трогается вовсе.
+test('handler: упавший вызов пишет estimated_tokens_in в D1 (#341)', async () => {
+  const d1 = fakeD1();
+  const response = await handle(new Request('https://l.test/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer t' },
+    body: JSON.stringify({ model: 'service', messages: [{ role: 'user', content: 'x'.repeat(4000) }] }),
+  }), { LADDER_TOKEN: 't', LADDER_TRACE_DB: d1 }, { store: memoryStore(0) });
+
+  assert.equal(response.status, 503, 'без ключей провайдера вызов падает, а не врёт');
+  assert.equal(d1._rows.length, 1, 'и строка в трассу при этом пишется');
+  const r = row(d1._rows[0]);
+  assert.equal(r.ok, 0);
+  assert.ok(Number.isFinite(r.estimated_tokens_in) && r.estimated_tokens_in > 0,
+    `ожидалась числовая оценка входа, получено ${r.estimated_tokens_in}`);
+});
+
 test('logCall: the caller sub-task tag lands in the row (#107)', async () => {
   const d1 = fakeD1();
   // The handler overwrites the raw header with the sanitised slug it sends to OpenRouter, so
