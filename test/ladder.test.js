@@ -1118,6 +1118,41 @@ test('upstreamRequest: HTTP-Referer / X-OpenRouter-Title / Visibility only on op
   }
 });
 
+// #341, п. 4: шлюз opencode-go отвечает HTTP 400 на любое неизвестное ему поле, а раньше сюда шёл
+// клиентский body целиком (`upstream = { ...body }`). Список собран замером против живого шлюза;
+// на OpenRouter ВСЕ эти поля проходят, поэтому фильтр применяется только к Go.
+test('upstreamRequest: opencode-go получает только известные поля, OpenRouter — body целиком (#341)', () => {
+  const body = {
+    model: 'service',
+    messages: [{ role: 'user', content: 'hi' }],
+    // замерено: каждый из этих даёт 400 от гейта opencode-go
+    top_k: 40, min_p: 0.05, repetition_penalty: 1.1, n: 2, logit_bias: { 1: -1 },
+    custom_id: 'c', store: true, parallel_tool_calls: false, prompt_cache: true,
+    // а эти проходят и должны доехать
+    temperature: 0.7, top_p: 0.9, stop: ['\n'], seed: 42,
+    user: 'trained-assist', metadata: { a: 'b' }, service_tier: 'auto',
+  };
+
+  const go = upstreamRequest(env, 'opencode-go/beam-free', body, 0, {});
+  for (const dropped of ['top_k', 'min_p', 'repetition_penalty', 'n', 'logit_bias',
+    'custom_id', 'store', 'parallel_tool_calls', 'prompt_cache']) {
+    assert.equal(dropped in go.body, false, `opencode-go не должен получить ${dropped}`);
+  }
+  for (const kept of ['messages', 'temperature', 'top_p', 'stop', 'seed', 'user', 'metadata', 'service_tier']) {
+    assert.ok(kept in go.body, `opencode-go обязан получить ${kept}`);
+  }
+  // model / stream / max_tokens выставляет сама лестница, а не клиент
+  assert.equal(go.body.model, 'beam-free');
+  assert.equal(go.body.stream, false);
+  assert.ok(go.body.max_tokens > 0, 'потолок ответа ставит лестница');
+
+  const or = upstreamRequest(env, 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', body, 0, {});
+  for (const field of ['top_k', 'n', 'store', 'min_p']) {
+    assert.ok(field in or.body, `OpenRouter получает body целиком — ${field} на месте`);
+  }
+  assert.equal(or.body.model, 'nvidia/nemotron-3-super-120b-a12b:free', 'и префикс у OpenRouter срезается как раньше');
+});
+
 test('app attribution defaults: no slug → llm-ladder, no title → Trained Assist (openrouter only)', () => {
   const or = upstreamRequest(env, 'openrouter/x/y', msg, 0, {});
   assert.equal(or.headers['HTTP-Referer'], `${APP_REFERER_BASE}/${DEFAULT_APP_SLUG}`);

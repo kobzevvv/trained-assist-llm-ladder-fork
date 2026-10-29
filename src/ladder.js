@@ -419,6 +419,36 @@ export function ringWaitMs(timeoutMs) {
 }
 const RF_400_RE = /structured[-_ ]outputs?|response[_ ]?format|json_object|stream_options/i;
 
+// Поля, которые шлюз opencode-go ПРИНИМАЕТ (#341, п. 4).
+//
+// Список собран замером против живого шлюза синтетическими пин-вызовами (одна ступень, без
+// failover). Проверены и прошли (200 OK): messages, tools с обычной схемой, tool_choice
+// (auto/required), response_format (json_object И json_schema strict), temperature, top_p, seed,
+// stop, user, metadata, service_tier, presence_penalty, frequency_penalty, stream, max_tokens.
+// Проверены и дали HTTP 400: top_k, min_p, repetition_penalty, n, logit_bias, custom_id, store,
+// parallel_tool_calls, prompt_cache. На OpenRouter ВСЕ они проходят — строгость свойство
+// именно этого гейта, поэтому фильтр применяется только к opencode-go.
+//
+// Симптом в проде: доля 400 среди вызовов beam-free — 57 % у product-owner против 2 % у
+// анонимного сканера (его payload минимален) и 0 % на лестницах free/plan/general. Первый ранг
+// упирался в 400 и жёг хоп 1–12 с перед переходом на dots-3.
+//
+// Известный остаток, НЕ закрытый здесь: tools со strict:true + $defs в схеме тоже даёт 400.
+// Санитайзация схемы меняет семантику structured outputs у клиента, поэтому решение принимается
+// отдельно и описано в #341.
+const GO_ALLOWED_FIELDS = new Set([
+  'messages', 'tools', 'tool_choice', 'response_format',
+  'temperature', 'top_p', 'presence_penalty', 'frequency_penalty',
+  'stop', 'seed', 'user', 'metadata', 'service_tier',
+]);
+
+// Только известные поля — и ничего сверх. model/stream/max_tokens выставляет сама лестница ниже.
+function pickGoFields(body) {
+  const out = {};
+  for (const field of Object.keys(body || {})) if (GO_ALLOWED_FIELDS.has(field)) out[field] = body[field];
+  return out;
+}
+
 export function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null, appSlug = null, appTitle = null, pool = null, orIndex = null } = {}) {
   const isGo = model.startsWith('opencode-go/');
   const isZen = model.startsWith('opencode-zen/');
@@ -444,7 +474,12 @@ export function upstreamRequest(env, model, body, keyIndex, { stream = false, st
     headers['X-OpenRouter-App-Visibility'] = 'hidden';
   }
   const upstream = {
-    ...body,
+    // Шлюз opencode-go принимает только известные ему поля и отвечает HTTP 400 на остальное,
+    // а раньше сюда forwardingался клиентский body целиком (#341, п. 4). Список собран замером
+    // синтетическими пин-вызовами: OpenRouter на том же теле отвечает 200, то есть строгость —
+    // свойство именно этого гейта. Из-за лишнего поля ~54 % вызовов beam-free упирались в 400
+    // на ПЕРВОЙ ступени и жгли хоп (1–12 с) перед уходом на dots-3.
+    ...(isGo ? pickGoFields(body) : body),
     model: model.replace(/^opencode-go\/|^opencode-zen\/|^openrouter\//, ''),
     stream,
     max_tokens: Math.max(Number(body.max_tokens) || 0, minTokensFor(model)),
