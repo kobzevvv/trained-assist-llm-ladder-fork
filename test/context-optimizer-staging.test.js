@@ -50,6 +50,12 @@ test('staging: optimizer succeeds → reduced prompt reaches ladder', async () =
   assert.ok(optEvent.tokens_before > 5000, 'tokens_before reflects original size');
   assert.ok(optEvent.tokens_after < optEvent.tokens_before, 'tokens_after is smaller');
   assert.equal(optEvent.threshold, 5000);
+
+  // The logged input size (race band, ttfb factor, trace) must reflect the SHRUNK
+  // prompt, not the original: otherwise a 2K optimized prompt would still race on
+  // the fat-prompt band (the exact bug behind incident 2026-10-28 / #341).
+  assert.ok(result.estimated_tokens_in < 2000,
+    `estimated_tokens_in should be the reduced size, got ${result.estimated_tokens_in}`);
 });
 
 // Scenario 2: All map calls fail → fail-open to original

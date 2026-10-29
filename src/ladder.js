@@ -894,7 +894,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   // max_tokens=32768 read as 36 057 — the same number then picked the hedge band, so a trivial
   // call raced three identical copies at three keys. The context gate keeps its own
   // input+output estimate below, which is the only place max_tokens belongs.
-  const estimatedTokensIn = estimateInputTokens(body);
+  let estimatedTokensIn = estimateInputTokens(body);
   let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [], estimated_tokens_in: estimatedTokensIn };
   // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
@@ -1037,6 +1037,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         // Optimization is a best-effort pre-step: a failure here must not poison the request.
         console.error('[context-optimizer] failed, proceeding with original:', e && e.message);
       }
+      // Re-measure after optimization: the race band, ttfb factor and the logged
+      // input size must describe what we actually SEND, not what the client sent.
+      estimatedTokensIn = estimateInputTokens(body);
     }
   }
 
