@@ -572,7 +572,7 @@ export function makeStore(env) {
     snapshot: (poolSizeArg, pinKey) => stub.snapshot(poolSizeArg ?? poolSize, pinKey),
     recordFailure: (model, f, extra) => stub.recordFailure(model, f, extra),
     recordSuccess: (model, extra) => stub.recordSuccess(model, extra),
-    rotateKey: (size, ttlMs, failedIndex) => stub.rotateKey(size, ttlMs, failedIndex),
+    rotateKey: (size, ttlMs, failedIndex, scope) => stub.rotateKey(size, ttlMs, failedIndex, scope),
     resetKeys: () => stub.resetKeys(),
     park: (models, untilMs) => stub.park(models, untilMs),
     parkAccount: (index, untilMs) => stub.parkAccount(index, untilMs),

@@ -17,7 +17,7 @@ export { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBe
 import { classifyError } from './classify.js';
 import { deadRungs } from './dead-rungs.js';
 import { orAccountLimit, orAccountLimitOf, orParkUntil } from './or-limits.js';
-import { estimateTokens, hedgePlan, ttfbFactor, GO_CONTEXT, canFitTokens } from './size-policy.js';
+import { estimateTokens, estimateInputTokens, hedgePlan, ttfbFactor, GO_CONTEXT, canFitTokens } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown, abandonQueuedTasks } from './zen-ring.js';
 import { isEmptyAnswer } from './answer-guard.js';
 import { resolveProviderPool } from './provider-credentials.js';
@@ -354,13 +354,18 @@ function orLimitOf(model, status, body) {
   return orAccountLimit(status, body);
 }
 
+// Почему ключ отказал — это решает, КОМУ отказ указ (#341). `scope: 'account'` — свойство самого
+// аккаунта (мёртвый ключ, нет оплаты): сажаем в общий exhausted, читают все. `scope: 'rate_limit'`
+// — временный лимит: сюда можно не доверять для другого тира, бесплатный не расходует платное
+// allowance (#69) и его этот отказ не касается.
 export function keyFaultOf(errorText) {
   const t = classSignal(errorText);
-  if (DEAD_KEY_RE.test(t)) return { dead: true, ttlMs: KEY_DEAD_TTL_MS };
-  if (KEY_QUOTA_RE.test(t)) return { dead: false, ttlMs: WEEKLY_LIMIT_RE.test(t) ? KEY_WEEKLY_TTL_MS : KEY_QUOTA_TTL_MS };
+  if (DEAD_KEY_RE.test(t)) return { dead: true, scope: 'account', ttlMs: KEY_DEAD_TTL_MS };
+  if (KEY_QUOTA_RE.test(t)) return { dead: false, scope: 'rate_limit', ttlMs: WEEKLY_LIMIT_RE.test(t) ? KEY_WEEKLY_TTL_MS : KEY_QUOTA_TTL_MS };
   // No payment = account has no active tariff. Instant error, instant rotation to the next key.
   // Use a short TTL (same as rate-limit) so the account is retried once payment is added.
-  if (NO_PAYMENT_RE.test(t)) return { dead: false, ttlMs: KEY_QUOTA_TTL_MS };
+  // Тариф — свойство АККАУНТА, поэтому scope 'account', несмотря на короткий TTL.
+  if (NO_PAYMENT_RE.test(t)) return { dead: false, scope: 'account', ttlMs: KEY_QUOTA_TTL_MS };
   return null;
 }
 
@@ -793,7 +798,13 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   // The ladder's own size estimate, computed once. It is returned on EVERY outcome —
   // successful or not — so the trace can answer "how big were the requests that failed?"
   // without needing the provider's usage counter, which only exists on a 200.
-  const estimatedTokensIn = estimateTokens(body);
+  //
+  // INPUT only (#341): the column is named estimated_tokens_in and must answer how big the
+  // request we SENT was. Feeding it the caller's output budget made an 11-token prompt with
+  // max_tokens=32768 read as 36 057 — the same number then picked the hedge band, so a trivial
+  // call raced three identical copies at three keys. The context gate keeps its own
+  // input+output estimate below, which is the only place max_tokens belongs.
+  const estimatedTokensIn = estimateInputTokens(body);
   let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [], estimated_tokens_in: estimatedTokensIn };
   // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
@@ -911,6 +922,11 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     keyIndex = nextFreeGoKeyIndex(pool.length);
   }
   const exhaustedAtStart = new Set(Object.keys(snap.keys.exhausted || {}).map(Number));
+  // Платный парк (#341). Живое множество, а не снимок: платный ранг сажает сюда ключи прямо
+  // по ходу звонка, и следующий платный ранг того же звонка обязан их видеть. Бесплатный ранг
+  // эту карту НЕ читает — лимит платного тира ему не указ, иначе платный хоп своим 429 лишает
+  // фоллбэк обхода ключей (инцидент 2026-10-28: beam-free отвечал 61 разу за тот же час).
+  const paidParked = new Set(Object.keys(snap.keys.paid || {}).map(Number));
   // A SLOW failure (timeout / empty answer / transport — anything whose error string is not an
   // HTTP status line) gets ONE spare-key probe per call (owner 2026-09-29: «ключ залимитился →
   // переключаем на другой, всё»): a silently throttled key looks exactly like a slow model, and
@@ -970,7 +986,13 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       attempts.push({ model, outcome: 'skipped', error: 'every OpenRouter account is parked until its limit resets' });
       continue;
     }
-    const rungInputTokens = estimateTokens(body);
+    // Две оценки, две работы (#341). `rungInputTokens` — что мы ОТПРАВЛЯЕМ: по нему выбирается
+    // полоса гонки и окно первого токена. `rungWindowTokens` — сколько должно ВЛЕЗТЬ в окно
+    // модели: вход плюс бюджет ответа. Потолок мерится вторым числом, и только туда попадает
+    // max_tokens. Раньше обе ветки читали одно число с max_tokens внутри, и промпт на 11 токенов
+    // с max_tokens=32768 гонялся на трёх ключах сразу (incident 2026-10-28, #341).
+    const rungInputTokens = estimatedTokensIn;
+    const rungWindowTokens = estimateTokens(body);
     // #38: a rung whose measured context window cannot fit the input is skipped BEFORE the
     // attempt — measured 2026-10-07: opencode-go takes ~98K tokens, and at ~123K answers
     // `429 Endpoint is unavailable` while rotating through every key — 48 s and three keys for
@@ -978,9 +1000,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     // the rung's health: the request is wrong for it, the model is fine (same rule as a context
     // overflow). The skip is recorded as `above the rung ceiling` so the diag can tell a real
     // context-class failure from a skipped-by-size gate.
-    if (!canFitTokens(model, rungInputTokens, orContextCatalog)) {
+    if (!canFitTokens(model, rungWindowTokens, orContextCatalog)) {
       attempts.push({ model, outcome: 'skipped',
-        error: `input ~${rungInputTokens}t above the rung ceiling` });
+        error: `input ~${rungWindowTokens}t above the rung ceiling` });
       continue;
     }
     const isFreeGo = isGo && model.endsWith('-free');
@@ -1013,7 +1035,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         goCapped = await goMonthlyCappedKeys(env, { fetchImpl });
       }
       if (goCapped && goCapped.size && goCapped.has(key)) {
-        const alt = pool.findIndex((_, i) => !exhaustedAtStart.has(i) && !goCapped.has(i));
+        const alt = pool.findIndex((_, i) => !exhaustedAtStart.has(i) && !paidParked.has(i) && !goCapped.has(i));
         if (alt >= 0) key = alt;
       }
     }
@@ -1041,10 +1063,22 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       reportProgress(onProgress, { type: 'retrying', rung: model, attempt: attempts.length, reason: 'invalid_response' });
       r = await attemptKey(key);
     }
-    while (!r.ok && isGo && !goParked) {
+    // `goParked` означает «для ПЛАТНЫХ рангов в пуле ничего не осталось» (#69). Бесплатный ранг
+    // этим флагом не ограничивается: у него собственная карта пригодных ключей — платный парк
+    // его не касается (#341), поэтому обход он обязан сделать сам. Раньше флаг глушил и этот
+    // цикл: ступень не пропускалась, но и не получала ни одной запасной попытки — ровно одна на
+    // ключе, который только что посадил платный 429, и отказ (инцидент 2026-10-28). Если
+    // пригодного ключа правда нет, spare === -1 и цикл выходит сразу, без лишнего хопа.
+    while (!r.ok && isGo && (!goParked || isFreeGo)) {
       const fault = keyFaultOf(r.error);
       if (fault) {
-        const rot = await store.rotateKey(pool.length, fault.ttlMs, key);
+        // Тир решает, куда сажать (#341): временный лимит, увиденный ПЛАТНЫМ рангом, уходит в
+        // платную карту и не лишает бесплатный фоллбэк обхода ключей. Всё остальное (мёртвый
+        // ключ, отсутствие тарифа, лимит, увиденный бесплатным рангом) — свойство АККАУНТА и
+        // сажается в общий exhausted, который читают все.
+        const scope = fault.scope === 'rate_limit' && isPaidGo ? 'paid' : 'account';
+        if (scope === 'paid') paidParked.add(key);
+        const rot = await store.rotateKey(pool.length, fault.ttlMs, key, scope);
         if (!rot.rotated) {
           // #69: never park free Go rungs here — the allowance they don't consume is exactly
           // what the ladder must fall back on while every key is limited.
@@ -1065,7 +1099,13 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       // overflow or a config-class rejection is a property of the request / the model, not the key.
       const cls = errorClass(r.error)?.class || 'transient';
       if (cls === 'context' || cls === 'config') break;
+      // Бесплатный ранг обходит ВЕСЬ непробованный пул (#341). Его ограничивает только общий
+      // exhausted — настоящее свойство аккаунта; платный парк и платный кап его не касаются.
+      // Иначе у фоллбэк-ступени после 429 платного хопа остаётся ровно одна попытка на уже
+      // припаркованном ключе — ровно так в инциденте 2026-10-28 погибал beam-free, хотя в пуле
+      // был ключ, который в тот же час отвечал 61 разу.
       const spare = pool.findIndex((_, i) => !tried.has(i) && !exhaustedAtStart.has(i)
+        && !(isPaidGo && paidParked.has(i))
         && !(isPaidGo && goCapped && goCapped.has(i)));
       if (spare < 0) break;
       // FAST rejection (the error string opens with `HTTP <code>`) → instant round trip, so the
@@ -1097,7 +1137,13 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     if (r.ok && refused403Keys.size) {
       refused403Keys.delete(key);
       for (const k of refused403Keys) {
-        try { await store.rotateKey(pool.length, KEY_QUOTA_TTL_MS, k); } catch { /* state is best-effort */ }
+        try {
+          // 403 оставляем в ОБЩЕМ парке, как и раньше (#311/#316): его вывод «ключ отказал, а
+          // здоровый брат отдал тот же payload» сделан про сам ключ, а не про тир, и ослаблять
+          // это право тиром было бы откатом защиты. Тирная разводка нужна лимиту (429), который
+          // и посадил все четыре ключа в инциденте 2026-10-28 (#341).
+          await store.rotateKey(pool.length, KEY_QUOTA_TTL_MS, k, 'account');
+        } catch { /* state is best-effort */ }
       }
     }
     // OpenRouter ACCOUNT limit (issue #297): the free allowance is counted per account, and the
