@@ -151,6 +151,11 @@ jobs:
         # не обновлялся (in_ladder устаревал, opencode-go не добирался до проб, #341 п. 2–3).
         # Без этой таблицы деплой ломает мониторинг молча, поэтому шаг идёт до deploy.
         run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/migrations/0018_catalog_changes.sql --remote
+      - name: Apply monitoring automation schema (#335 follow-up)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/migrations/0018_monitoring_automation.sql --remote || true
       - name: Provision D1 zen database
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
