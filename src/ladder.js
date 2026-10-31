@@ -283,6 +283,18 @@ export function rungsFor(config, name) {
   return l[role || DEFAULT_ROLE] || l[DEFAULT_ROLE] || null;
 }
 
+// Provider switch (config: "providers": { "<prefix>": { "enabled": false } }). Absent config or
+// an entry without enabled:false → the provider is ON. A switched-off prefix is skipped at runtime
+// but its rungs STAY in the ladders: turning it back on is one flag and the order is exactly what
+// it was (same contract as "zen_ring": false).
+export function providerEnabled(config, model) {
+  const m = String(model || '');
+  const slash = m.indexOf('/');
+  if (slash <= 0) return true;
+  const p = config?.providers?.[m.slice(0, slash)];
+  return !p || p.enabled !== false;
+}
+
 function stripFences(s) {
   return String(s || '').replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
 }
@@ -761,13 +773,21 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   if (pinRung) {
     if (!all.includes(pinRung)) return { ok: false, status: 400, error: `rung not in ladder: ${pinRung}`, attempts: [], estimated_tokens_in: estimatedTokensIn };
     all = [pinRung];
-  } else if (config?.zen_ring === false) {
-    // The zen ring is switched OFF (config: "zen_ring": false). Its runners are not registered,
-    // so every ring rung answers `provider_capacity` — the ladder would pay a hop per rung before
-    // it moves on. The rungs STAY in the config: when the runners are back, turning the ring on is
-    // one flag and the order of the ladders is exactly what it was.
-    all = all.filter((m) => !m.startsWith('zen-rings/'));
-    if (!all.length) return { ok: false, status: 503, error: 'no rung left: the zen ring is switched off and the ladder has no other rung', attempts: [], estimated_tokens_in: estimatedTokensIn };
+  } else {
+    if (config?.zen_ring === false) {
+      // The zen ring is switched OFF (config: "zen_ring": false). Its runners are not registered,
+      // so every ring rung answers `provider_capacity` — the ladder would pay a hop per rung before
+      // it moves on. The rungs STAY in the config: when the runners are back, turning the ring on is
+      // one flag and the order of the ladders is exactly what it was.
+      all = all.filter((m) => !m.startsWith('zen-rings/'));
+      if (!all.length) return { ok: false, status: 503, error: 'no rung left: the zen ring is switched off and the ladder has no other rung', attempts: [], estimated_tokens_in: estimatedTokensIn };
+    }
+    // The provider switch (config: "providers": { "<prefix>": { "enabled": false } }). A disabled
+    // prefix is skipped BEFORE any attempt, key check or benchmark ordering — the ladder never pays
+    // a hop on a rung it must not call. The rungs STAY in the config: the provider comes back by
+    // flipping one flag and the order is exactly what it was.
+    all = all.filter((m) => providerEnabled(config, m));
+    if (!all.length) return { ok: false, status: 503, error: 'no rung left: every provider of the ladder is disabled', attempts: [], estimated_tokens_in: estimatedTokensIn };
   }
   if (!pinRung && env?.LADDER_TRACE_DB) {
     // The Go block and the OpenRouter free block are ordered by the measured answer time; the

@@ -115,7 +115,7 @@ test('chat completion exposes live progress while preserving the ordinary OpenAI
       'x-ladder-progress-token': OWNER,
     },
     body: JSON.stringify({ model: 'standard', messages: [{ role: 'user', content: 'synthetic test' }] }),
-  }), { LADDER_TOKEN: 'shared-token', OPENCODE_GO_API_KEYS: 'synthetic-key', LADDER_TRACE_DB: db }, {
+  }), { LADDER_TOKEN: 'shared-token', OPENCODE_GO_API_KEYS: 'synthetic-key', OPENROUTER_API_KEY: 'or-key', LADDER_TRACE_DB: db }, {
     store,
     fetchImpl: async (_url, init) => {
       providerCalls.push(JSON.parse(init.body));
@@ -192,7 +192,7 @@ test('terminal failures and streamed calls publish truthful terminal progress', 
     headers: { authorization: 'Bearer shared-token', 'content-type': 'application/json',
       'x-ladder-call-id': streamId, 'x-ladder-progress-token': OWNER },
     body: JSON.stringify({ model: 'standard', stream: true, messages: [{ role: 'user', content: 'synthetic stream' }] }),
-  }), { LADDER_TOKEN: 'shared-token', OPENCODE_GO_API_KEYS: 'synthetic-key', LADDER_TRACE_DB: streamDb }, {
+  }), { LADDER_TOKEN: 'shared-token', OPENCODE_GO_API_KEYS: 'synthetic-key', OPENROUTER_API_KEY: 'or-key', LADDER_TRACE_DB: streamDb }, {
     store: streamStore,
     fetchImpl: async () => ({ ok: true, status: 200, body: new ReadableStream({ start(controller) {
       controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'));

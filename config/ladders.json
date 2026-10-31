@@ -1,5 +1,5 @@
 {
-  "_comment": "Model ladders. Rungs top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = OpenRouter, opencode-zen/* = zen free tier via the GCP relay (RETIRED: the relay VM's ephemeral IP moved, the URL is pinned to the old one, and zen-rings/* covers the same models — no rung uses it), zen-rings/* = zen free tier through the ring of GitHub Actions repos. NO ALIASES: one name, one ladder. Ladders: service (bot service calls, roles build/plan/explore/general/review + classify/summarize/format/route/gate), doctor (strong Go tier), research (hermes reads), conversation (hh-skill writing), build/build advanced/plan/explore/general/review (role ladders, #71), vision/vision advanced (images), free (hard $0 ceiling).",
+  "_comment": "Model ladders. Rungs top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = OpenRouter, opencode-zen/* = zen free tier via the GCP relay (RETIRED: the relay VM's ephemeral IP moved, the URL is pinned to the old one, and zen-rings/* covers the same models — no rung uses it), zen-rings/* = zen free tier through the ring of GitHub Actions repos. NO ALIASES: one name, one ladder. Ladders: service (bot service calls, roles build/plan/explore/general/review + classify/summarize/format/route/gate), doctor (strong Go tier), research (hermes reads), conversation (hh-skill writing), build/build advanced/plan/explore/general/review (role ladders, #71), vision/vision advanced (images), free (hard $0 ceiling). PROVIDER SWITCH: 'providers' turns a whole rung prefix on or off at runtime ('enabled': false) — the rungs STAY in the ladders, nothing is rewritten; 'opencode-go' is OFF for now (both the free beam tier and the paid tail are skipped) and comes back by flipping one flag; while off every ladder serves openrouter/* rungs only, free first then paid.",
   "backoff": {
     "baseMs": 15000,
     "multiplier": 2,
@@ -7,6 +7,11 @@
     "failureWindowMs": 900000
   },
   "zen_ring": false,
+  "providers": {
+    "opencode-go": {
+      "enabled": false
+    }
+  },
   "ladders": {
     "service": {
       "build": [
@@ -21,7 +26,8 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "zen-rings/nemotron-3.5-lightning-free",
         "zen-rings/big-pickle",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "plan": [
         "opencode-go/beam-free",
@@ -35,7 +41,8 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "zen-rings/nemotron-3.5-lightning-free",
         "zen-rings/big-pickle",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "explore": [
         "opencode-go/beam-free",
@@ -49,7 +56,8 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "zen-rings/nemotron-3.5-lightning-free",
         "zen-rings/big-pickle",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "general": [
         "opencode-go/beam-free",
@@ -63,7 +71,8 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "zen-rings/nemotron-3.5-lightning-free",
         "zen-rings/big-pickle",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "review": [
         "opencode-go/beam-free",
@@ -77,7 +86,8 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "zen-rings/nemotron-3.5-lightning-free",
         "zen-rings/big-pickle",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "classify": [
         "opencode-go/beam-free",
@@ -91,7 +101,8 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "zen-rings/nemotron-3.5-lightning-free",
         "zen-rings/big-pickle",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "summarize": [
         "opencode-go/beam-free",
@@ -105,7 +116,8 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "zen-rings/nemotron-3.5-lightning-free",
         "zen-rings/big-pickle",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "format": [
         "opencode-go/beam-free",
@@ -119,7 +131,8 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "zen-rings/nemotron-3.5-lightning-free",
         "zen-rings/big-pickle",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "route": [
         "opencode-go/beam-free",
@@ -133,7 +146,8 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "zen-rings/nemotron-3.5-lightning-free",
         "zen-rings/big-pickle",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "gate": [
         "opencode-go/beam-free",
@@ -147,7 +161,8 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "zen-rings/nemotron-3.5-lightning-free",
         "zen-rings/big-pickle",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ]
     },
     "doctor": {
@@ -159,7 +174,8 @@
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/qwen3.7-plus",
-        "opencode-go/deepseek-v4-pro"
+        "opencode-go/deepseek-v4-pro",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "plan": [
         "opencode-go/beam-free",
@@ -169,7 +185,8 @@
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/qwen3.7-plus",
-        "opencode-go/deepseek-v4-pro"
+        "opencode-go/deepseek-v4-pro",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "explore": [
         "opencode-go/beam-free",
@@ -179,7 +196,8 @@
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/qwen3.7-plus",
-        "opencode-go/deepseek-v4-pro"
+        "opencode-go/deepseek-v4-pro",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "general": [
         "opencode-go/beam-free",
@@ -189,7 +207,8 @@
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/qwen3.7-plus",
-        "opencode-go/deepseek-v4-pro"
+        "opencode-go/deepseek-v4-pro",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "review": [
         "opencode-go/beam-free",
@@ -199,7 +218,8 @@
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/qwen3.7-plus",
-        "opencode-go/deepseek-v4-pro"
+        "opencode-go/deepseek-v4-pro",
+        "openrouter/z-ai/glm-5.3-flash"
       ]
     },
     "research": {
@@ -210,7 +230,8 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/deepseek-v4.1-flash"
+        "opencode-go/deepseek-v4.1-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "plan": [
         "opencode-go/beam-free",
@@ -219,7 +240,8 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/deepseek-v4.1-flash"
+        "opencode-go/deepseek-v4.1-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "general": [
         "opencode-go/beam-free",
@@ -228,7 +250,8 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/deepseek-v4.1-flash"
+        "opencode-go/deepseek-v4.1-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "review": [
         "opencode-go/beam-free",
@@ -237,7 +260,8 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/deepseek-v4.1-flash"
+        "opencode-go/deepseek-v4.1-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ],
       "explore": [
         "opencode-go/beam-free",
@@ -245,7 +269,8 @@
         "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ]
     },
     "conversation": {
@@ -255,7 +280,8 @@
         "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ]
     },
     "build": {
@@ -266,7 +292,8 @@
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ]
     },
     "plan": {
@@ -276,7 +303,8 @@
         "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ]
     },
     "explore": {
@@ -286,7 +314,8 @@
         "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ]
     },
     "general": {
@@ -296,7 +325,8 @@
         "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ]
     },
     "review": {
@@ -306,7 +336,8 @@
         "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ]
     },
     "build advanced": {
@@ -316,7 +347,8 @@
         "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
-        "opencode-go/mimo-v2.6-flash"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/z-ai/glm-5.3-flash"
       ]
     },
     "vision": {
@@ -339,19 +371,19 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
-        "openrouter/google/gemini-3.1-flash-lite-preview",
+        "openrouter/z-ai/glm-5.3-flash",
         "opencode-go/deepseek-v4-pro"
       ],
       "plan": [
         "opencode-go/mimo-v2.6-flash",
-        "openrouter/google/gemini-3.1-flash-lite-preview",
+        "openrouter/z-ai/glm-5.3-flash",
         "opencode-go/deepseek-v4-pro"
       ]
     },
     "fast": {
       "build": [
         "opencode-go/mimo-v2.6-flash",
-        "openrouter/google/gemini-3.1-flash-lite-preview",
+        "openrouter/z-ai/glm-5.3-flash",
         "opencode-go/deepseek-v4-pro"
       ]
     },

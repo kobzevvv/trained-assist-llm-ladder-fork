@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor, ringWaitMs, RING_WAIT_MS, ringGuardRetry, orderBenchmarkedGoRungs } from '../src/ladder.js';
+import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor, providerEnabled, ringWaitMs, RING_WAIT_MS, ringGuardRetry, orderBenchmarkedGoRungs } from '../src/ladder.js';
 import { estimateTokens } from '../src/size-policy.js';
 import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
@@ -37,8 +37,10 @@ test('orderBenchmarkedGoRungs: context-specific speed chooses first model and re
 // Behaviour tests run against a config with the zen-rings head removed: those rungs are cold in
 // tests (no D1 rows, no workers), so every call would failover — and the GOLADDER[0]/GOFREE[0]
 // indexes below address Go/OpenRouter rungs. Config-assertion tests keep the real `config`.
+// The provider switch is OFF here on purpose: these tests exercise ladder mechanics (order,
+// failover, keys) with the Go rungs live — the switch itself has its own tests below.
 const noZen = (l) => l.filter((m) => !m.startsWith('zen-rings/'));
-const GOCFG = { ...config, ladders: {} };
+const GOCFG = { ...config, ladders: {}, providers: {} };
 for (const [name, roles] of Object.entries(config.ladders)) {
   GOCFG.ladders[name] = Object.fromEntries(Object.entries(roles).map(([r, l]) => [r, noZen(l)]));
 }
@@ -75,7 +77,7 @@ const msg = { model: 'service', messages: [{ role: 'user', content: 'hi' }] };
 // has a stable second rung.
 const DIAG_REASONING = 'opencode-go/mimo-v2.6-flash';
 const DIAG_SECOND = 'opencode-go/deepseek-v4.1-flash';
-const DIAG_CFG = { ...config, ladders: { ...config.ladders, service: { build: [DIAG_REASONING, DIAG_SECOND] } } }; // keyed by the canonical name
+const DIAG_CFG = { ...config, ladders: { ...config.ladders, service: { build: [DIAG_REASONING, DIAG_SECOND] } }, providers: {} }; // keyed by the canonical name
 
 // Владелец 2026-10-08: первой платной Go сразу за zen поставили сначала Muse Spark 1.3
 // Contributor ($0.10/$0.20 — самая дешёвая в прайсе), но она отдаёт `400 … This Go model trains
@@ -84,6 +86,9 @@ const DIAG_CFG = { ...config, ladders: { ...config.ladders, service: { build: [D
 // mimo-v2.6-flash, раз так сложно». MUSE остаётся константой только ради проверки ОТСУТСТВИЯ.
 const MUSE = 'opencode-go/muse-spark-1.3-contributor';
 const MIMO = 'opencode-go/mimo-v2.6-flash';
+// Платный хвост (owner 2026-10-31): фиксированный GLM 5.3 Flash на OpenRouter — пока Go выключен
+// свитчем, он закрывает ВСЕ не-фри лестницы; динамику выбора платной модели вернём позже.
+const GLM = 'openrouter/z-ai/glm-5.3-flash';
 // Бесплатный ранг с окном 1M: единственный, куда влезает жирная сессия opencode (замер 08.10 —
 // payload дорос до 788 КБ ≈ 197K токенов, а потолок Go 100K, зен 50/20 КБ, у sante окно 262K
 // и он один и раз в несколько минут уходит в 429-пропуск). Без такого ранга лестница отвечает
@@ -110,6 +115,7 @@ test('config: #67 — zen ring opens, free Go → free Zen head → free OpenRou
     'zen-rings/nemotron-3.5-lightning-free',
     'zen-rings/big-pickle',
     'opencode-go/mimo-v2.6-flash',
+    'openrouter/z-ai/glm-5.3-flash',
   ]);
   // The zen ring opens the service ladder (owner 2026-10-05): a fast free model first, one
   // attempt, then the ladder rides down. The #42 ban on zen in `service` is lifted: its reason
@@ -130,12 +136,16 @@ test('config: #67 — zen ring opens, free Go → free Zen head → free OpenRou
   // Владелец 2026-10-08: «на OR нет денег — платный должен быть на Go». Каждый платный ранг
   // OpenRouter отвечал 402 и сжигал хоп, поэтому из НЕ-ФРИ лестниц они убраны целиком.
   const paid = m => m.startsWith('openrouter/') && !m.endsWith(':free');
-  assert.equal(LADDER.filter(paid).length, 0, 'ни одного платного ранга OpenRouter — деньги на Go');
+  // Владелец 2026-10-31: Go выключен свитчем (providers), платный хвост лестниц — фиксированный
+  // GLM 5.3 Flash на OpenRouter (динамику вернём позже). В конфиге он один платный OR-ранг.
+  assert.deepEqual(LADDER.filter(paid), ['openrouter/z-ai/glm-5.3-flash'],
+    'единственный платный ранг OpenRouter — GLM 5.3 Flash, последним');
   assert.ok(LADDER.filter(m => m.startsWith('openrouter/') && m.endsWith(':free')).length === 6,
     'шесть бесплатных OpenRouter стоят перед платным хвостом (#36)');
   // Владелец 2026-10-08: «после zen сделать первой платной Go самую дешёвую». Muse (400 Privacy
   // settings) убрана → первой идёт mimo $0.28, платный сегмент от дешёвых к дорогим.
-  assert.equal(LADDER[LADDER.length - 1], MIMO, 'mimo — последняя платная Go, после всех бесплатных');
+  assert.equal(LADDER[LADDER.length - 1], 'openrouter/z-ai/glm-5.3-flash', 'GLM 5.3 Flash — платный хвост после платной Go');
+  assert.equal(LADDER[LADDER.length - 2], MIMO, 'mimo — последняя платная Go, после всех бесплатных');
   assert.ok(!LADDER.includes(MUSE), 'Muse убрана из лестницы: 400 trains on request data (Privacy settings)');
   // Инвариант: все бесплатные Go/zen/OpenRouter стоят перед платным Go.
   const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
@@ -194,7 +204,51 @@ test('config: aliases — only the legacy deepseek alias remains, resolving to b
   }
 });
 
+// ── Provider switch: config "providers" = { "<prefix>": { "enabled": false } } ──────────────
+// Владелец 2026-10-31: opencode-go (бесплатный beam-free И платный хвост) выключен — на выходе
+// только OpenRouter, сначала бесплатные, потом платный GLM 5.3 Flash. Раунги в конфиге ЖИВУТ:
+// возврат Go — один флаг. Тот же контракт, что у "zen_ring": false.
+test('provider switch: disabled prefix is skipped before any attempt, config keeps the rungs', async () => {
+  assert.deepEqual(rungsFor(config, 'service'), config.ladders.service.build, 'the config ladder still lists the Go rungs');
+  const calls = [];
+  // Все бесплатные OpenRouter падают → лестница доходит до платного GLM, ни разу не тронув Go.
+  const beh = {};
+  for (const m of GOLADDER.filter(x => x.endsWith(':free'))) beh[short(m)] = () => ({ status: 500, error: 'boom' });
+  const r = await run(msg, { env: { OPENROUTER_API_KEY: 'or_key' }, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.ok, true, 'the ladder still answers');
+  assert.equal(r.model, 'openrouter/z-ai/glm-5.3-flash', 'the paid GLM rung closes the ladder');
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((c) => c.url.includes('openrouter.ai')), `only OpenRouter was called, got ${calls.map((c) => c.url)}`);
+  assert.ok(r.attempts.every((a) => !a.model.startsWith('opencode-go/')), 'no attempt is recorded on a disabled provider');
+});
+
+test('provider switch: every provider disabled → 503 without a single attempt', async () => {
+  const calls = [];
+  const cfg = { ...config, providers: { 'opencode-go': { enabled: false }, openrouter: { enabled: false } } };
+  const r = await run(msg, { env, config: cfg, store: memoryStore(2), fetchImpl: fakeFetch({}, calls) });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 503);
+  assert.equal(r.error, 'no rung left: every provider of the ladder is disabled');
+  assert.deepEqual(calls, []);
+});
+
+test('provider switch: enabled:true / absent entry keeps the provider, pin bypasses the switch', async () => {
+  assert.equal(providerEnabled({}, 'opencode-go/beam-free'), true, 'no providers block → on');
+  assert.equal(providerEnabled({ providers: { 'opencode-go': { enabled: true } } }, 'opencode-go/beam-free'), true);
+  assert.equal(providerEnabled(config, 'opencode-go/beam-free'), false, 'the shipped config has Go off');
+  assert.equal(providerEnabled(config, 'openrouter/z-ai/glm-5.3-flash'), true);
+  assert.equal(providerEnabled(config, 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free'), true);
+  // A pin is an explicit request — same rule as dead-rungs: it is never filtered.
+  resetFreeGoKeyCursor();
+  const calls = [];
+  const r = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, calls), pinRung: 'opencode-go/beam-free' });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, 'opencode-go/beam-free');
+  assert.ok(calls[0].url.includes('/go/'));
+});
+
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
+  resetFreeGoKeyCursor(); // provider-switch tests above run a pinned Go rung and move the shared cursor
   const calls = [];
   const r = await run({ ...msg, max_tokens: 5 }, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch({}, calls) });
   assert.equal(r.ok, true);
@@ -653,7 +707,7 @@ async function readAll(stream) {
 
 test('free-headed ladder rotates Go keys round-robin across calls (#81)', async () => {
   resetFreeGoKeyCursor();
-  const cfg = { ...config, ladders: { ...config.ladders, free: { build: ['opencode-go/beam-free'] } } };
+  const cfg = { ...config, ladders: { ...config.ladders, free: { build: ['opencode-go/beam-free'] } }, providers: {} };
   const calls = [];
   const fetchImpl = async (url, init) => {
     calls.push(init.headers.Authorization);
@@ -752,26 +806,27 @@ test('ladder_rung pins one rung: no failover, health skip ignored, foreign rung 
   assert.equal((await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch({}, []), pinRung: 'openrouter/x/y' })).status, 400);
 });
 
-test('config: doctor = free Go → free Zen head → free OpenRouter → paid Go (owner 2026-09-28 / 2026-10-09)', () => {
+test('config: doctor = free Go → free Zen head → free OpenRouter → paid Go → paid GLM tail (owner 2026-09-28 / 2026-10-09)', () => {
   const expected = ['opencode-go/beam-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', 'openrouter/dots-studio/dots-3-note-preview:free',
-    'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus', 'opencode-go/deepseek-v4-pro'];
+    'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus', 'opencode-go/deepseek-v4-pro',
+    'openrouter/z-ai/glm-5.3-flash'];
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.doctor[role], expected, role);
 });
 
-test('config: research is split by role — free Go → free Zen head → free OpenRouter → paid Go (owner 2026-09-30 / 2026-10-09)', () => {
+test('config: research is split by role — free Go → free Zen head → free OpenRouter → paid Go → paid GLM tail (owner 2026-09-30 / 2026-10-09)', () => {
   const reader = ['opencode-go/beam-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', 'openrouter/dots-studio/dots-3-note-preview:free',
-    'opencode-go/mimo-v2.6-flash'];
+    'opencode-go/mimo-v2.6-flash', 'openrouter/z-ai/glm-5.3-flash'];
   assert.deepEqual(config.ladders.research.explore, reader);
   const thinker = ['opencode-go/beam-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', 'openrouter/dots-studio/dots-3-note-preview:free',
-    'opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash'];
+    'opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'openrouter/z-ai/glm-5.3-flash'];
   assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
   assert.ok(!JSON.stringify(config.ladders.research).includes('openrouter/google/gemini'), 'платный Gemini убран — деньги на Go (owner 2026-10-08)');
 });
 
-test('config: conversation = hh-skill writing — free Go → free Zen head → free OpenRouter → paid Go (owner 2026-10-01 / 2026-10-09)', () => {
+test('config: conversation = hh-skill writing — free Go → free Zen head → free OpenRouter → paid Go → paid GLM tail (owner 2026-10-01 / 2026-10-09)', () => {
   const expected = [
     'opencode-go/beam-free',
     'zen-rings/nemotron-3-ultra-free',
@@ -779,6 +834,7 @@ test('config: conversation = hh-skill writing — free Go → free Zen head → 
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'opencode-go/mimo-v2.6-flash',
+    'openrouter/z-ai/glm-5.3-flash',
   ];
   assert.deepEqual(CONVERSATION, expected);
   assert.deepEqual(config.ladders.conversation, { build: expected }, 'conversation is the build-role ladder');
@@ -809,10 +865,10 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
 
   // Порядок: free Go → free Zen → free OpenRouter → paid Go. Платный Go — в самом хвосте,
   // после всех бесплатных моделей (owner 2026-10-09).
-  assert.deepEqual(config.ladders.build.build, [FG, ...zenHead, 'openrouter/inclusionai/ling-3.0-flash-sante:free', BIG, DOTS, MIMO], 'build = free Go + zen ring x2 + free OR + two big windows + mimo in tail');
-  assert.deepEqual(config.ladders['build advanced'].build, [FG, ZEN, ZEN2, 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', DOTS, MIMO], 'build advanced = бесплатный Go + zen ring + бесплатный OpenRouter + mimo в хвосте');
+  assert.deepEqual(config.ladders.build.build, [FG, ...zenHead, 'openrouter/inclusionai/ling-3.0-flash-sante:free', BIG, DOTS, MIMO, GLM], 'build = free Go + zen ring x2 + free OR + two big windows + mimo + GLM в хвосте');
+  assert.deepEqual(config.ladders['build advanced'].build, [FG, ZEN, ZEN2, 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', DOTS, MIMO, GLM], 'build advanced = бесплатный Go + zen ring + бесплатный OpenRouter + mimo + GLM в хвосте');
   for (const role of ['plan', 'general', 'review']) {
-    assert.deepEqual(config.ladders[role], { build: [FG, ZEN, ZEN2, BIG, DOTS, MIMO] }, `${role} advanced-first — роль=лестница (#71)`);
+    assert.deepEqual(config.ladders[role], { build: [FG, ZEN, ZEN2, BIG, DOTS, MIMO, GLM] }, `${role} advanced-first — роль=лестница (#71)`);
   }
 
   // explore: контексты замерены по OpenRouter /v1/models 2026-10-02 — mimo 1M,
@@ -825,7 +881,8 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'opencode-go/mimo-v2.6-flash',
-  ], 'explore = zen ring + бесплатный OpenRouter + mimo в хвосте (1M + 512K)');
+    GLM,
+  ], 'explore = zen ring + бесплатный OpenRouter + mimo + GLM в хвосте (1M + 512K)');
   assert.ok(!JSON.stringify(explore).includes('ling-3.0-flash'), 'ling 256k must not enter explore');
 
   // vision (распознавание картинок): всё multimodal image+text, 1M (замер архитектуры OpenRouter 02.10)
@@ -850,7 +907,8 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   assert.ok(config.ladders.build.build.includes('zen-rings/nemotron-3-ultra-free'), 'ultra:free остаётся в build');
   // Владелец 2026-10-09: «сначала free go, далее free zen, потом free openrouter и только потом
   // платные модели go». Платный Go — в хвосте, после всех бесплатных моделей.
-  assert.equal(config.ladders.service.build[config.ladders.service.build.length - 1], MIMO, 'самая дешёвая платная Go — последняя в лестнице');
+  assert.equal(config.ladders.service.build[config.ladders.service.build.length - 1], GLM, 'платный GLM 5.3 Flash замыкает лестницу (owner 2026-10-31)');
+  assert.equal(config.ladders.service.build[config.ladders.service.build.length - 2], MIMO, 'самая дешёвая платная Go — перед GLM-хвостом');
   assert.equal(config.ladders.service.build[0], 'opencode-go/beam-free', 'бесплатный Go открывает лестницу');
   assert.deepEqual(config.ladders.service.build.slice(1, 3),
     ['zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free'], 'за ним пара zen-rings');
@@ -891,8 +949,11 @@ const SKIP = new Set(['free', 'vision', 'vision advanced', 'standard', 'fast']);
         `${name}:${role} — платный Go-сегмент от дешёвых к дорогим`);
       assert.equal(paidNames[0], MIMO, `${name}:${role} — mimo ($0.28/1M) первая платная Go`);
       assert.ok(!rungs.includes(MUSE), `${name}:${role} — Muse нет: 400 trains on request data (Privacy settings)`);
-      assert.equal(rungs.filter(m => m.startsWith('openrouter/') && !m.endsWith(':free')).length, 0,
-        `${name}:${role} — платного OpenRouter нет (402, деньги на Go, owner 2026-10-08)`);
+      // Владелец 2026-10-31: платный OpenRouter — ровно один ранг (GLM 5.3 Flash) и он замыкает
+      // лестницу; Go-ранги остаются в конфиге, но выключены свитчем.
+      assert.deepEqual(rungs.filter(m => m.startsWith('openrouter/') && !m.endsWith(':free')), [GLM],
+        `${name}:${role} — платный OpenRouter ровно один: GLM 5.3 Flash (owner 2026-10-31)`);
+      assert.equal(rungs[rungs.length - 1], GLM, `${name}:${role} — GLM замыкает лестницу`);
       assert.ok(rungs.includes(BIG), `${name}:${role} — есть бесплатный ранг с окном 1M (иначе жирная сессия → every rung failed)`);
       assert.ok(rungs.includes(DOTS), `${name}:${role} — есть ВТОРОЕ большое окно (512K): одно перегруженное не должно ронять лестницу`);
       assert.ok(freeGo.length > 0, `${name}:${role} — есть бесплатный Go (голова)`);
@@ -1062,7 +1123,7 @@ const ZEN_WALK = [
   'opencode-zen/mimo-v2.6-flash-free',
   'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
 ];
-const ZEN_CFG = { ...config, ladders: { ...config.ladders, service: { build: ZEN_WALK } } }; // canonical key
+const ZEN_CFG = { ...config, ladders: { ...config.ladders, service: { build: ZEN_WALK } }, providers: {} }; // canonical key
 const zenGoFail = () => ({
   [short(ZEN_WALK[0])]: () => ({ status: 500, error: 'boom' }),
   [short(ZEN_WALK[1])]: () => ({ status: 500, error: 'boom' }),

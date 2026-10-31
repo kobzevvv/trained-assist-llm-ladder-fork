@@ -26,9 +26,12 @@ for (const name of names) {
 }
 
 test('Standard Plan has a dedicated paid-first route and is advertised as standard:plan', async () => {
+  // Владелец 2026-10-31: платный шаг OpenRouter — фиксированный GLM 5.3 Flash (динамика позже);
+  // gemini-3.1-flash-lite-preview в standard/fast заменён им. Go-ранги остаются в конфиге
+  // (свитч вернёт их одним флагом), но на вызовы не ходят.
   const expected = [
     'opencode-go/mimo-v2.6-flash',
-    'openrouter/google/gemini-3.1-flash-lite-preview',
+    'openrouter/z-ai/glm-5.3-flash',
     'opencode-go/deepseek-v4-pro',
   ];
   assert.deepEqual(config.ladders.standard.plan, expected);
@@ -87,15 +90,16 @@ async function execute(name, failAll) {
   return { seen, result, rungs: cfg.ladders[name].build };
 }
 
-test('standard reaches an independent paid OpenRouter reserve after cheaper rungs fail', async () => {
+test('standard reaches the paid GLM reserve after the free OpenRouter rungs fail — Go is never called', async () => {
   const { seen, result, rungs } = await execute('standard', false);
   assert.equal(result.ok, true);
   assert.equal(result.model, rungs.find((model) => model.startsWith('openrouter/') && !free(model)));
-  assert.ok(seen.some((call) => call.url.includes('opencode.ai')));
-  assert.ok(seen.some((call) => call.url.includes('openrouter.ai')));
+  assert.ok(seen.some((call) => call.url.includes('openrouter.ai')), 'a paid OpenRouter rung answers');
+  assert.ok(seen.every((call) => !call.url.includes('opencode.ai')),
+    'Go is switched off (providers.opencode-go.enabled = false) — no hop on its rungs');
 });
 
-test('standard:plan starts on paid Go MiMo and falls through only to its paid reserves', async () => {
+test('standard:plan answers on its paid rung — fixed GLM 5.3 Flash while Go is switched off', async () => {
   const seen = [];
   const result = await run(request('standard:plan'), {
     env, config, store: memoryStore(2),
@@ -106,12 +110,14 @@ test('standard:plan starts on paid Go MiMo and falls through only to its paid re
     },
   });
   assert.equal(result.ok, true);
-  assert.equal(result.model, 'opencode-go/mimo-v2.6-flash');
-  assert.deepEqual(seen.map((call) => call.model), ['mimo-v2.6-flash']);
-  assert.ok(seen[0].url.includes('/go/'));
+  assert.equal(result.model, 'openrouter/z-ai/glm-5.3-flash');
+  assert.deepEqual(seen.map((call) => call.model), ['z-ai/glm-5.3-flash']);
+  assert.ok(seen[0].url.includes('openrouter.ai'));
 });
 
-test('standard:plan uses its independent paid OpenRouter reserve when Go MiMo fails', async () => {
+test('standard:plan stays on the fixed GLM rung even when the free rungs above would accept — paid-first is the profile contract', async () => {
+  // standard:plan is PAID-FIRST by design: with Go disabled its single effective rung is GLM.
+  // This pin keeps the paid OpenRouter reserve INDEPENDENT of the free ladder head.
   const seen = [];
   const result = await run(request('standard:plan'), {
     env, config, store: memoryStore(2),
@@ -123,15 +129,10 @@ test('standard:plan uses its independent paid OpenRouter reserve when Go MiMo fa
     },
   });
   assert.equal(result.ok, true);
-  assert.equal(result.model, 'openrouter/google/gemini-3.1-flash-lite-preview');
-  assert.deepEqual(seen.map((call) => call.model), [
-    'mimo-v2.6-flash',
-    'mimo-v2.6-flash', // same-rung transient retry
-    'google/gemini-3.1-flash-lite-preview',
-  ]);
-  assert.ok(seen[0].url.includes('/go/'));
-  assert.ok(seen[1].url.includes('/go/'));
-  assert.ok(seen[2].url.includes('openrouter.ai'));
+  assert.equal(result.model, 'openrouter/z-ai/glm-5.3-flash');
+  assert.deepEqual(seen.map((call) => call.model), ['z-ai/glm-5.3-flash'],
+    'Go MiMo is switched off — the ladder does not burn a hop on it');
+  assert.ok(seen[0].url.includes('openrouter.ai'));
 });
 
 test('fast exhausts explicitly and never falls into a free rung', async () => {
@@ -141,8 +142,8 @@ test('fast exhausts explicitly and never falls into a free rung', async () => {
   assert.ok(seen.every((call) => rungs.some((model) => model.endsWith(call.model))));
 });
 
-test('fast sends the normal request body to its paid first rung', async () => {
-  const model = config.ladders.fast.build[0];
+test('fast sends the normal request body to its paid first rung (GLM while Go is switched off)', async () => {
+  const model = 'openrouter/z-ai/glm-5.3-flash'; // the effective first rung: mimo is disabled by the provider switch
   const messages = [{ role: 'user', content: 'synthetic ordinary request' }];
   const seen = [];
   const result = await run({ ...request('fast'), messages }, {

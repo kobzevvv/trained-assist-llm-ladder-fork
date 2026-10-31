@@ -14,5 +14,6 @@
   "openrouter/google/gemini-2.5-flash-lite": [0.10, 0.40, 0],
   "openrouter/google/gemini-2.5-flash": [0.30, 2.50, 0],
   "openrouter/google/gemini-3.8-flash": [0.75, 3.75, 0],
-  "openrouter/google/gemini-3.1-flash-lite-preview": [0.25, 1.50, 0.025]
+  "openrouter/google/gemini-3.1-flash-lite-preview": [0.25, 1.50, 0.025],
+  "openrouter/z-ai/glm-5.3-flash": [0.0157, 0.0294, 0.0143]
 }

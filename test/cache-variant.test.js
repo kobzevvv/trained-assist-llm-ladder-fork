@@ -7,7 +7,7 @@ import { memoryStore } from '../src/state.js';
 const free = 'opencode-go/example-free';
 const paid = 'opencode-go/example-paid';
 const config = { ladders: { service: { build: [free, paid] } } };
-const env = { OPENCODE_GO_API_KEYS: 'key-a,key-b', LADDER_TOKEN: 'test-token' };
+const env = { OPENCODE_GO_API_KEYS: 'key-a,key-b', LADDER_TOKEN: 'test-token', OPENROUTER_API_KEY: 'or-key' };
 const compact = [{ role: 'user', content: 'compact' }];
 const masked = [{ role: 'user', content: 'masked-prefix' }];
 
